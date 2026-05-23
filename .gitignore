@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.vscode/
+checkpoints/
+.pytest_cache/
+.mypy_cache/

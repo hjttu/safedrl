@@ -28,6 +28,30 @@ For larger experiments matching the paper, run with `--agents 6` or `--agents 9`
 The paper used much longer training on GPU hardware, so the defaults here are
 kept small enough for smoke testing.
 
+Checkpoints are saved automatically:
+
+```text
+checkpoints/gmatrans_lagr_agents3_25.pt
+checkpoints/gmatrans_lagr_agents3_50.pt
+checkpoints/gmatrans_lagr_agents3_final.pt
+```
+
+Useful training options:
+
+```powershell
+python scripts/train_gmatrans_lagr.py --agents 6 --updates 1000 --steps 256 --checkpoint-dir checkpoints --save-interval 50
+python scripts/train_gmatrans_lagr.py --resume checkpoints/gmatrans_lagr_agents3_final.pt
+```
+
+## Evaluate
+
+```powershell
+python scripts/evaluate_gmatrans_lagr.py --checkpoint checkpoints/gmatrans_lagr_agents3_final.pt --episodes 100
+```
+
+The evaluator reports success rate, finish steps, episode reward, episode cost,
+and average minimal distance, matching the paper's Monte Carlo test metrics.
+
 ## Paper-to-code Map
 
 - Eq. (4), UAV dynamics: `gmarlagr/env.py`

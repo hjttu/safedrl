@@ -60,18 +60,18 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, graph_dim: int, hidden_dim: int = 128):
+    def __init__(self, input_dim: int, hidden_dim: int = 128):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(graph_dim, hidden_dim),
+            nn.Linear(input_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, pooled_graph_emb: torch.Tensor) -> torch.Tensor:
-        return self.net(pooled_graph_emb).squeeze(-1)
+    def forward(self, critic_input: torch.Tensor) -> torch.Tensor:
+        return self.net(critic_input).squeeze(-1)
 
 
 class GraphActorCritic(nn.Module):
@@ -88,8 +88,8 @@ class GraphActorCritic(nn.Module):
         super().__init__()
         self.encoder = GraphTransformerEncoder(node_dim=node_dim, embed_dim=embed_dim)
         self.actor = Actor(embed_dim, self_dim, n_actions, hidden_dim)
-        self.reward_critic = Critic(embed_dim, hidden_dim)
-        self.cost_critic = Critic(embed_dim, hidden_dim)
+        self.reward_critic = Critic(embed_dim * 2, hidden_dim)
+        self.cost_critic = Critic(embed_dim * 2, hidden_dim)
 
     def encode(self, nodes: torch.Tensor, edge_dist: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         return self.encoder(nodes, edge_dist, mask)
@@ -100,10 +100,14 @@ class GraphActorCritic(nn.Module):
         action = dist.sample()
         return action, dist.log_prob(action), dist.entropy(), graph_emb
 
+    def critic_values(self, graph_emb: torch.Tensor, n_agents: int) -> tuple[torch.Tensor, torch.Tensor]:
+        pooled = graph_emb.view(-1, n_agents, graph_emb.shape[-1]).mean(dim=1)
+        pooled_per_agent = pooled.repeat_interleave(n_agents, dim=0)
+        critic_input = torch.cat([graph_emb, pooled_per_agent], dim=-1)
+        return self.reward_critic(critic_input), self.cost_critic(critic_input)
+
     def evaluate_actions(self, nodes, edge_dist, mask, self_state, actions, n_agents: int):
         graph_emb = self.encode(nodes, edge_dist, mask)
         dist = self.actor.distribution(graph_emb, self_state)
-        pooled = graph_emb.view(-1, n_agents, graph_emb.shape[-1]).mean(dim=1)
-        values_r = self.reward_critic(pooled).repeat_interleave(n_agents)
-        values_c = self.cost_critic(pooled).repeat_interleave(n_agents)
+        values_r, values_c = self.critic_values(graph_emb, n_agents)
         return dist.log_prob(actions), dist.entropy(), values_r, values_c

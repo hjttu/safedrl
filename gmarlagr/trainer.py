@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -26,6 +27,9 @@ class TrainConfig:
     actor_lr: float = 3e-4
     lambda_lr: float = 1e-2
     cost_limit: float = 0.05
+    checkpoint_dir: str = "checkpoints"
+    save_interval: int = 25
+    run_name: str = "gmatrans_lagr"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -38,20 +42,23 @@ class GMATransLagrTrainer:
         self.model.to(self.device)
         self.optim = torch.optim.Adam(self.model.parameters(), lr=self.cfg.actor_lr)
         self.lagrange = torch.zeros(env.cfg.n_agents, device=self.device)
+        self.history: list[dict[str, float]] = []
 
     def train(self):
         obs = self.env.reset()
-        history = []
         for update in range(1, self.cfg.total_updates + 1):
             rollout, obs, stats = self.collect_rollout(obs)
             loss_info = self.update(rollout)
             row = {"update": update, **stats, **loss_info, "lambda": self.lagrange.mean().item()}
-            history.append(row)
+            self.history.append(row)
             print(
                 f"update={update:04d} reward={row['reward']:.2f} cost={row['cost']:.3f} "
                 f"lambda={row['lambda']:.3f} loss={row['loss']:.3f}"
             )
-        return history
+            if self.cfg.save_interval > 0 and update % self.cfg.save_interval == 0:
+                self.save_checkpoint(update)
+        self.save_checkpoint(self.cfg.total_updates, final=True)
+        return self.history
 
     @torch.no_grad()
     def collect_rollout(self, obs):
@@ -63,9 +70,7 @@ class GMATransLagrTrainer:
         for _ in range(self.cfg.rollout_steps):
             nodes, edge, mask, self_state = collate_graphs([obs], self.device)
             action, logp, _, graph_emb = self.model.act(nodes, edge, mask, self_state)
-            pooled = graph_emb.view(1, n_agents, -1).mean(dim=1)
-            value_r = self.model.reward_critic(pooled).repeat(n_agents)
-            value_c = self.model.cost_critic(pooled).repeat(n_agents)
+            value_r, value_c = self.model.critic_values(graph_emb, n_agents)
 
             next_obs, reward, cost, terminated, truncated, _ = self.env.step(action.cpu().numpy())
             done = np.full(n_agents, terminated or truncated, dtype=np.float32)
@@ -95,7 +100,7 @@ class GMATransLagrTrainer:
         adv_c, ret_c = generalized_advantage_estimate(
             data["costs"], data["values_c"], data["dones"], self.cfg.gamma, self.cfg.gae_lambda
         )
-        self._update_lagrange(data["log_probs"], adv_c, data["values_c"])
+        self._update_lagrange(data["log_probs"], data["log_probs"], adv_c, data["values_c"])
 
         lagr = self.lagrange.view(1, n_agents).detach()
         adv_hyb = adv_r - lagr * adv_c
@@ -144,9 +149,47 @@ class GMATransLagrTrainer:
         }
 
     @torch.no_grad()
-    def _update_lagrange(self, old_logp: torch.Tensor, adv_c: torch.Tensor, value_c: torch.Tensor) -> None:
-        del old_logp
+    def _update_lagrange(
+        self,
+        new_logp: torch.Tensor,
+        old_logp: torch.Tensor,
+        adv_c: torch.Tensor,
+        value_c: torch.Tensor,
+    ) -> None:
+        ratio = (new_logp - old_logp).exp()
         violation = (value_c - self.cfg.cost_limit).mean(dim=0)
-        delta_lambda = -(violation * (1.0 - self.cfg.gamma) + adv_c.mean(dim=0))
+        delta_lambda = -(violation * (1.0 - self.cfg.gamma) + (ratio * adv_c).mean(dim=0))
         self.lagrange.sub_(self.cfg.lambda_lr * delta_lambda)
         self.lagrange.clamp_(min=0.0)
+
+    def checkpoint_path(self, update: int | str) -> Path:
+        name = f"{self.cfg.run_name}_agents{self.env.cfg.n_agents}_{update}.pt"
+        return Path(self.cfg.checkpoint_dir) / name
+
+    def save_checkpoint(self, update: int, final: bool = False) -> Path:
+        Path(self.cfg.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+        tag: int | str = "final" if final else update
+        path = self.checkpoint_path(tag)
+        torch.save(
+            {
+                "model": self.model.state_dict(),
+                "optimizer": self.optim.state_dict(),
+                "lagrange": self.lagrange.detach().cpu(),
+                "train_config": asdict(self.cfg),
+                "env_config": asdict(self.env.cfg),
+                "history": self.history,
+                "update": update,
+            },
+            path,
+        )
+        return path
+
+    def load_checkpoint(self, path: str | Path) -> dict:
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model"])
+        if "optimizer" in checkpoint:
+            self.optim.load_state_dict(checkpoint["optimizer"])
+        if "lagrange" in checkpoint:
+            self.lagrange = checkpoint["lagrange"].to(self.device)
+        self.history = list(checkpoint.get("history", []))
+        return checkpoint
