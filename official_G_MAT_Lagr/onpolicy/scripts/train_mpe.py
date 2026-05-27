@@ -13,11 +13,13 @@ except ImportError:
 import numpy as np
 from pathlib import Path
 import torch
-from onpolicy import global_var as glv
 import os, sys
 
-sys.path.append(os.path.abspath(os.getcwd()))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
+from onpolicy import global_var as glv
 from utils.utils import print_args, print_box, connected_to_internet
 from onpolicy.config import get_config
 from multiagent.MPE_env import MPEEnv, GraphMPEEnv
