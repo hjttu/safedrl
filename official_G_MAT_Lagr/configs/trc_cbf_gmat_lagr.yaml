@@ -1,0 +1,68 @@
+algorithm_name: rmappo
+env_name: GSMPE
+scenario_name: graph_navigation_3agts
+graph_feat_type: global
+use_att_gnn: false
+use_cbf_filter: true
+use_attention_priority: true
+use_responsibility: true
+use_trm: true
+use_cbf_guide: true
+cbf_edge_feature_dim: 11
+cbf_k1: 2.0
+cbf_k2: 2.0
+d_safe_agent: 0.25
+d_safe_obstacle: 0.30
+slack_penalty_base: 100.0
+slack_penalty_priority: 500.0
+beta_min: 0.2
+beta_max: 0.95
+memory_reset_steps: 20
+memory_reset_h: 1.0
+lambda_int: 0.1
+lambda_trm: 0.05
+lambda_guide_init: 0.2
+guide_schedule_type: s_curve
+eval_hard_filter: true
+deadlock_speed_thresh: 0.03
+deadlock_goal_dist: 0.3
+deadlock_near_h: 0.05
+deadlock_K: 20
+
+ablations:
+  original:
+    use_cbf_filter: false
+    use_attention_priority: false
+    use_responsibility: false
+    use_trm: false
+    use_cbf_guide: false
+  vanilla_cbf:
+    use_cbf_filter: true
+    use_attention_priority: false
+    use_responsibility: false
+    use_trm: false
+    use_cbf_guide: false
+  priority_only:
+    use_cbf_filter: true
+    use_attention_priority: true
+    use_responsibility: false
+    use_trm: false
+    use_cbf_guide: false
+  responsibility:
+    use_cbf_filter: true
+    use_attention_priority: true
+    use_responsibility: true
+    use_trm: false
+    use_cbf_guide: false
+  trm:
+    use_cbf_filter: true
+    use_attention_priority: true
+    use_responsibility: true
+    use_trm: true
+    use_cbf_guide: false
+  guide_curriculum:
+    use_cbf_filter: true
+    use_attention_priority: true
+    use_responsibility: true
+    use_trm: true
+    use_cbf_guide: true
