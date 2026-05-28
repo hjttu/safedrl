@@ -18,6 +18,26 @@ from .util import init, get_clones
 
 """GNN modules"""
 
+def normalize_edge_attr(edge_attr: Tensor, max_edge_dist: float) -> Tensor:
+    """Bound CBF edge features before they enter neural layers.
+
+    Raw CBF features include large sentinel TTC values (1e3). Feeding them
+    directly into TransformerConv makes PPO numerically fragile, especially
+    with AMP. The QP filter still receives raw features from the rollout path;
+    this normalization is only for neural message passing.
+    """
+    edge_attr = torch.nan_to_num(edge_attr, nan=0.0, posinf=1e3, neginf=-1e3)
+    if edge_attr.dim() == 2 and edge_attr.size(-1) > 1:
+        edge_attr = edge_attr.clone()
+        edge_attr[:, 0] = torch.clamp(edge_attr[:, 0] / max(max_edge_dist, 1e-6), 0.0, 1.0)
+        edge_attr[:, 1:5] = torch.clamp(edge_attr[:, 1:5], -5.0, 5.0)
+        edge_attr[:, 5] = torch.clamp(edge_attr[:, 5] / max(max_edge_dist * max_edge_dist, 1e-6), 0.0, 1.0)
+        edge_attr[:, 6:8] = torch.clamp(edge_attr[:, 6:8], -5.0, 5.0)
+        edge_attr[:, 8] = torch.clamp(edge_attr[:, 8], 0.0, 10.0) / 10.0
+        edge_attr[:, 9] = torch.clamp(edge_attr[:, 9], 0.0, 3.0) / 3.0
+        edge_attr[:, 10] = torch.clamp(edge_attr[:, 10], 0.0, 1.0)
+    return edge_attr
+
 class EmbedConv(MessagePassing):
     def __init__(self, 
                 input_dim:int, 
@@ -374,6 +394,7 @@ class TransformerConvNet(nn.Module):
 
         # Ensure edge_attr is 2D
         edge_attr = edge_attr.unsqueeze(1) if edge_attr.dim() == 1 else edge_attr
+        edge_attr = normalize_edge_attr(edge_attr, max_edge_dist)
         # print("edge_index", edge_index.shape)
 
         return edge_index, edge_attr

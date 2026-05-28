@@ -6,6 +6,7 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 from onpolicy.algorithms.utils.util import init, check
+from onpolicy.algorithms.utils.gnn_transformer import normalize_edge_attr
 # from onpolicy.algorithms.utils.gnn_transformer import GNNBase
 # from onpolicy.algorithms.utils.gnn import GNNBase
 from onpolicy.algorithms.utils.mlp import MLPBase
@@ -133,12 +134,14 @@ class GR_Actor(nn.Module):
         edge_attr = adj if adj.dim() == 4 else adj.unsqueeze(-1)
         dist = edge_attr[..., 0]
         edge_mask = ((dist < self.args.max_edge_dist) & (dist > 0)).float()
+        edge_attr_for_head = normalize_edge_attr(edge_attr.reshape(-1, edge_attr.shape[-1]), self.args.max_edge_dist)
+        edge_attr_for_head = edge_attr_for_head.view_as(edge_attr)
         if self.use_attention_priority:
-            priority = self.priority_head(edge_attr).squeeze(-1) * edge_mask
+            priority = self.priority_head(edge_attr_for_head).squeeze(-1) * edge_mask
         else:
             priority = edge_mask
         if self.use_responsibility:
-            gamma_raw = self.responsibility_head(edge_attr).squeeze(-1)
+            gamma_raw = self.responsibility_head(edge_attr_for_head).squeeze(-1)
             gamma = gamma_raw.clone()
             # Pairwise normalization for agent-agent directed pairs. Entity type
             # is the last CBF feature when CBF edge features are enabled.

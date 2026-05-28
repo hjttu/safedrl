@@ -88,6 +88,7 @@ class Categorical(nn.Module):
 
     def forward(self, x: torch.tensor, available_actions=None):
         x = self.linear(x)
+        x = torch.nan_to_num(x, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
         # supress the logits at all non-available actions
         if available_actions is not None:
             x[available_actions == 0] = torch.finfo(x.dtype).min
