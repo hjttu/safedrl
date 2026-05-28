@@ -156,7 +156,7 @@ class GSReplayBuffer(object):
         if self.use_cbf_action_mask and act_space.__class__.__name__ == "MultiDiscrete":
             joint_dim = int((act_space.high[0] - act_space.low[0] + 1) * (act_space.high[1] - act_space.low[1] + 1))
             self.available_actions = np.ones(
-                (self.episode_length + 1, self.n_rollout_threads, num_agents, joint_dim * 2),
+                (self.episode_length + 1, self.n_rollout_threads, num_agents, joint_dim * 3),
                 dtype=np.float32,
             )
         elif act_space.__class__.__name__ == "Discrete":

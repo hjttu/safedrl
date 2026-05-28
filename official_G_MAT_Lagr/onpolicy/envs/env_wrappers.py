@@ -1040,6 +1040,9 @@ def graphworker(remote, parent_remote, env_fn_wrapper):
                 env.render(mode=data)
         elif cmd == 'set_cl':
             env._set_CL(data)
+        elif cmd == "get_guide_actions":
+            action = env.policy_u(env.world, env.gp_type)
+            remote.send(np.asarray(action, dtype=np.float32).squeeze(-1))
         elif cmd == "reset_task":
             ob, ag_id, node_ob, adj = env.reset_task()
             remote.send((ob, ag_id, node_ob, adj))
@@ -1123,6 +1126,10 @@ class GraphDummyVecEnv(ShareVecEnv):
     def set_CL(self, CL_ratio):
         for env in self.envs:
             env._set_CL(CL_ratio)
+
+    def get_guide_actions(self):
+        actions = [env.policy_u(env.world, env.gp_type) for env in self.envs]
+        return np.asarray(actions, dtype=np.float32).squeeze(-1)
 
 
 class GraphSubprocVecEnv(ShareVecEnv):
@@ -1230,3 +1237,8 @@ class GraphSubprocVecEnv(ShareVecEnv):
     def set_CL(self, CL_ratio):
         for remote in self.remotes:
             remote.send(('set_cl', CL_ratio))
+
+    def get_guide_actions(self):
+        for remote in self.remotes:
+            remote.send(("get_guide_actions", None))
+        return np.stack([remote.recv() for remote in self.remotes])

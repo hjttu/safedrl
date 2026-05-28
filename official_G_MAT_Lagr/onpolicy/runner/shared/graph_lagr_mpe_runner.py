@@ -21,6 +21,10 @@ from onpolicy.algorithms.cbf.temporal_responsibility_memory import TemporalRespo
 def _t2n(x):
     return x.detach().cpu().numpy()
 
+def _smoothstep(x):
+    x = np.clip(x, 0.0, 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
 class GSMPERunner(Runner):
     """
     Runner class to perform training, evaluation and data
@@ -75,11 +79,40 @@ class GSMPERunner(Runner):
                 action_mask_soft_penalty=getattr(self.all_args, "action_mask_soft_penalty", True),
                 neighbor_action_mode=getattr(self.all_args, "neighbor_action_mode", "zero"),
                 empty_mask_fallback=getattr(self.all_args, "empty_mask_fallback", "min_violation"),
+                guide_tau=getattr(self.all_args, "guide_tau", 0.5),
+                semi_hard_mask=getattr(self.all_args, "semi_hard_mask", True),
+                guide_fallback_topk=getattr(self.all_args, "guide_fallback_topk", 5),
             )
         )
         self.last_actions_norm = np.zeros((self.n_rollout_threads, self.num_agents, 2), dtype=np.float32)
+        self.current_total_num_steps = 0
+        self.last_pg_cbf_stats = {
+            "guide_alpha": 0.0,
+            "cbf_beta": 0.0,
+            "h_keep_current": getattr(self.all_args, "h_keep_init", -0.05),
+            "hard_mask_enabled": 0.0,
+            "min_valid_action_ratio": getattr(self.all_args, "min_valid_action_ratio_init", 0.7),
+        }
         if self.use_train_render:
             print("render the image while training")
+
+    def _pg_cbf_schedule(self, total_num_steps: int):
+        progress = min(1.0, float(total_num_steps) / max(float(self.num_env_steps), 1.0))
+        guide_decay_ratio = max(float(getattr(self.all_args, "guide_decay_ratio", 0.6)), 1e-6)
+        warmup_ratio = float(getattr(self.all_args, "cbf_warmup_ratio", 0.2))
+        warmup_denom = max(1.0 - warmup_ratio, 1e-6)
+        alpha_t = float(getattr(self.all_args, "guide_alpha_init", 1.0)) * max(0.0, 1.0 - progress / guide_decay_ratio)
+        beta_t = float(getattr(self.all_args, "cbf_beta_init", 0.02)) + (
+            float(getattr(self.all_args, "cbf_beta_final", 0.5)) - float(getattr(self.all_args, "cbf_beta_init", 0.02))
+        ) * _smoothstep(max(0.0, (progress - warmup_ratio) / warmup_denom))
+        h_keep_t = float(getattr(self.all_args, "h_keep_init", -0.05)) + (
+            float(getattr(self.all_args, "h_keep_final", 0.05)) - float(getattr(self.all_args, "h_keep_init", -0.05))
+        ) * _smoothstep(progress)
+        hard_enabled = bool(getattr(self.all_args, "action_mask_hard", True)) and progress >= float(getattr(self.all_args, "hard_mask_start_ratio", 0.7))
+        min_valid_ratio = float(getattr(self.all_args, "min_valid_action_ratio_init", 0.7)) + (
+            float(getattr(self.all_args, "min_valid_action_ratio_final", 0.3)) - float(getattr(self.all_args, "min_valid_action_ratio_init", 0.7))
+        ) * _smoothstep(progress)
+        return progress, alpha_t, beta_t, h_keep_t, hard_enabled, min_valid_ratio
 
     def run(self):
         if self.save_data:
@@ -111,6 +144,10 @@ class GSMPERunner(Runner):
             glv.set_value('CL_ratio', CL_ratio)  #curriculum learning
             self.envs.set_CL(glv.get_value('CL_ratio'))  # env_wrapper
             for step in range(self.episode_length):
+                self.current_total_num_steps = (
+                    episode * self.episode_length * self.n_rollout_threads
+                    + step * self.n_rollout_threads
+                )
                 # print("step:", step)
                 # Sample actions
                 (   values,
@@ -199,14 +236,27 @@ class GSMPERunner(Runner):
                     train_infos["min_inter_agent_distance"] = float(np.min(masked)) if masked.size else 0.0
                 if self.use_cbf_action_mask:
                     mdiag = self.buffer.action_mask_diag
+                    train_infos["guide_alpha"] = self.last_pg_cbf_stats["guide_alpha"]
+                    train_infos["cbf_beta"] = self.last_pg_cbf_stats["cbf_beta"]
+                    train_infos["h_keep_current"] = self.last_pg_cbf_stats["h_keep_current"]
+                    train_infos["hard_mask_enabled"] = self.last_pg_cbf_stats["hard_mask_enabled"]
                     train_infos["safe_action_ratio"] = float(np.mean(mdiag[..., 0]))
+                    train_infos["valid_action_ratio"] = float(np.mean(mdiag[..., 0]))
                     train_infos["empty_mask_rate"] = float(np.mean(mdiag[..., 1]))
                     train_infos["average_num_safe_actions"] = float(np.mean(mdiag[..., 2]))
                     train_infos["min_num_safe_actions"] = float(np.min(mdiag[..., 3]))
                     train_infos["action_mask_entropy"] = float(np.mean(mdiag[..., 4]))
                     train_infos["hard_violation_min"] = float(np.min(mdiag[..., 5]))
                     train_infos["soft_risk_penalty_mean"] = float(np.mean(mdiag[..., 6]))
+                    train_infos["risk_penalty_mean"] = float(np.mean(mdiag[..., 6]))
                     train_infos["fallback_action_rate"] = float(np.mean(mdiag[..., 7]))
+                    train_infos["guide_fallback_rate"] = float(np.mean(mdiag[..., 7]))
+                    if self.buffer.available_actions is not None and self.buffer.available_actions.shape[-1] == 3 * self.action_n_x * self.action_n_y:
+                        _, risk_part, guide_part = np.split(self.buffer.available_actions[:-1], 3, axis=-1)
+                        train_infos["guide_logits_mean"] = float(np.mean(guide_part))
+                        train_infos["risk_penalty_weighted_mean"] = float(np.mean(risk_part))
+                    else:
+                        train_infos["guide_logits_mean"] = 0.0
       
                 print("\n Scenario {} Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}, CL {}.\n"
                         .format(self.all_args.scenario_name,
@@ -277,16 +327,33 @@ class GSMPERunner(Runner):
         action_mask = None
         action_mask_diag = np.zeros((self.n_rollout_threads, self.num_agents, 8), dtype=np.float32)
         if self.use_cbf_action_mask:
-            mask, soft_penalty, action_mask_diag = self.action_masker.build_batch(
+            _, alpha_t, beta_t, h_keep_t, hard_enabled, min_valid_ratio = self._pg_cbf_schedule(
+                self.current_total_num_steps
+            )
+            guide_actions_norm = self._get_guide_actions_norm() if getattr(self.all_args, "use_cbf_guide", False) else None
+            mask, risk_penalty, guide_logits, action_mask_diag = self.action_masker.build_batch(
                 self.buffer.node_obs[step],
                 self.buffer.adj[step],
                 agent_max_accel=0.5,
                 last_actions_norm=self.last_actions_norm,
+                guide_actions_norm=guide_actions_norm,
+                hard_enabled=hard_enabled,
+                h_keep=h_keep_t,
+                semi_hard_mask=getattr(self.all_args, "semi_hard_mask", True),
+                min_valid_action_ratio=min_valid_ratio,
+                guide_fallback_topk=getattr(self.all_args, "guide_fallback_topk", 5),
             )
             if getattr(self.all_args, "action_mask_soft_penalty", True):
-                action_mask = np.concatenate([mask, self.all_args.lambda_soft_mask * soft_penalty], axis=-1)
+                action_mask = np.concatenate([mask, beta_t * risk_penalty, alpha_t * guide_logits], axis=-1)
             else:
-                action_mask = np.concatenate([mask, np.zeros_like(soft_penalty)], axis=-1)
+                action_mask = np.concatenate([mask, np.zeros_like(risk_penalty), alpha_t * guide_logits], axis=-1)
+            self.last_pg_cbf_stats = {
+                "guide_alpha": float(alpha_t),
+                "cbf_beta": float(beta_t),
+                "h_keep_current": float(h_keep_t),
+                "hard_mask_enabled": float(hard_enabled),
+                "min_valid_action_ratio": float(min_valid_ratio),
+            }
 
         (
             value,
@@ -415,6 +482,16 @@ class GSMPERunner(Runner):
             cost_preds,
             rnn_states_cost,
         )
+
+    def _get_guide_actions_norm(self):
+        if not hasattr(self.envs, "get_guide_actions"):
+            return np.zeros((self.n_rollout_threads, self.num_agents, 2), dtype=np.float32)
+        guide = np.asarray(self.envs.get_guide_actions(), dtype=np.float32)
+        if guide.ndim == 4 and guide.shape[-1] == 1:
+            guide = guide[..., 0]
+        if guide.shape != (self.n_rollout_threads, self.num_agents, 2):
+            guide = guide.reshape(self.n_rollout_threads, self.num_agents, 2)
+        return np.clip(guide, -1.0, 1.0).astype(np.float32)
 
     def insert(self, data):
         (

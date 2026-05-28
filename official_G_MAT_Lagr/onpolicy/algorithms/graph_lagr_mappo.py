@@ -84,6 +84,10 @@ class GS_MAPPO():
         self.lambda_int = getattr(args, "lambda_int", 0.0)
         self.lambda_trm = getattr(args, "lambda_trm", 0.0)
         self.lambda_guide_init = getattr(args, "lambda_guide_init", 0.0)
+        self.guide_loss_decay_ratio = getattr(args, "guide_loss_decay_ratio", 0.4)
+        # TODO(PG-CBF-AM): add optional early guide CE/KL imitation on raw joint
+        # logits. The current implementation keeps the default update unchanged
+        # and applies guide information only through rollout/evaluate logits.
 
         # Value and cost normalizers
         if self._use_popart:

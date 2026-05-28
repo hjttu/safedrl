@@ -10,6 +10,40 @@ import torch.nn.functional as F
 from typing import Optional
 
 
+def _build_multidiscrete_joint_logits(action_outs, x, available_actions=None):
+    logits_x = action_outs[0].linear(x)
+    logits_y = action_outs[1].linear(x)
+    logits_x = torch.nan_to_num(logits_x, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
+    logits_y = torch.nan_to_num(logits_y, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
+    joint_logits = logits_x.unsqueeze(2) + logits_y.unsqueeze(1)
+    batch_size, n_x, n_y = joint_logits.shape
+    joint_logits = joint_logits.reshape(batch_size, n_x * n_y)
+
+    if available_actions is not None:
+        action_dim = joint_logits.shape[-1]
+        if available_actions.shape[-1] == 3 * action_dim:
+            mask, risk_penalty, guide_logits = torch.chunk(available_actions, 3, dim=-1)
+            joint_logits = joint_logits + guide_logits - risk_penalty
+        elif available_actions.shape[-1] == 2 * action_dim:
+            mask, soft_penalty = torch.chunk(available_actions, 2, dim=-1)
+            joint_logits = joint_logits - soft_penalty
+        elif available_actions.shape[-1] == action_dim:
+            mask = available_actions
+        else:
+            mask = None
+        if mask is not None:
+            valid_mask = mask > 0
+            empty_rows = ~valid_mask.any(dim=-1, keepdim=True)
+            if empty_rows.any():
+                fallback_idx = joint_logits.argmax(dim=-1, keepdim=True)
+                fallback_mask = torch.zeros_like(valid_mask)
+                fallback_mask.scatter_(1, fallback_idx, True)
+                valid_mask = torch.where(empty_rows, fallback_mask, valid_mask)
+            joint_logits = joint_logits.masked_fill(~valid_mask, torch.finfo(joint_logits.dtype).min)
+
+    return joint_logits, n_y
+
+
 class ACTLayer(nn.Module):
     """
     MLP Module to compute actions.
@@ -95,19 +129,9 @@ class ACTLayer(nn.Module):
             )
 
         elif self.multi_discrete and available_actions is not None and available_actions.shape[-1] > len(self.action_outs):
-            logits_x = self.action_outs[0].linear(x)
-            logits_y = self.action_outs[1].linear(x)
-            logits_x = torch.nan_to_num(logits_x, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
-            logits_y = torch.nan_to_num(logits_y, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
-            joint_logits = logits_x.unsqueeze(2) + logits_y.unsqueeze(1)
-            batch_size, n_x, n_y = joint_logits.shape
-            joint_logits = joint_logits.reshape(batch_size, n_x * n_y)
-            if available_actions.shape[-1] == 2 * joint_logits.shape[-1]:
-                mask, soft_penalty = torch.chunk(available_actions, 2, dim=-1)
-                joint_logits = joint_logits - soft_penalty
-            else:
-                mask = available_actions
-            joint_logits = joint_logits.masked_fill(mask <= 0, torch.finfo(joint_logits.dtype).min)
+            joint_logits, n_y = _build_multidiscrete_joint_logits(
+                self.action_outs, x, available_actions
+            )
             action_logit = torch.distributions.Categorical(logits=joint_logits)
             joint_action = joint_logits.argmax(dim=-1) if deterministic else action_logit.sample()
             ax = torch.div(joint_action, n_y, rounding_mode="floor")
@@ -216,19 +240,9 @@ class ACTLayer(nn.Module):
             )  #! dosen't make sense
 
         elif self.multi_discrete and available_actions is not None and available_actions.shape[-1] > len(self.action_outs):
-            logits_x = self.action_outs[0].linear(x)
-            logits_y = self.action_outs[1].linear(x)
-            logits_x = torch.nan_to_num(logits_x, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
-            logits_y = torch.nan_to_num(logits_y, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
-            joint_logits = logits_x.unsqueeze(2) + logits_y.unsqueeze(1)
-            batch_size, n_x, n_y = joint_logits.shape
-            joint_logits = joint_logits.reshape(batch_size, n_x * n_y)
-            if available_actions.shape[-1] == 2 * joint_logits.shape[-1]:
-                mask, soft_penalty = torch.chunk(available_actions, 2, dim=-1)
-                joint_logits = joint_logits - soft_penalty
-            else:
-                mask = available_actions
-            joint_logits = joint_logits.masked_fill(mask <= 0, torch.finfo(joint_logits.dtype).min)
+            joint_logits, n_y = _build_multidiscrete_joint_logits(
+                self.action_outs, x, available_actions
+            )
             action_dist = torch.distributions.Categorical(logits=joint_logits)
             joint_action = action[:, 0].long() * n_y + action[:, 1].long()
             action_log_probs = action_dist.log_prob(joint_action).unsqueeze(-1)
