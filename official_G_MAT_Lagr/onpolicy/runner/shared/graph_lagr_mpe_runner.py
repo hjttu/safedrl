@@ -54,8 +54,16 @@ class GSMPERunner(Runner):
                 eval_hard_filter=getattr(self.all_args, "eval_hard_filter", True),
             )
         )
+        self.action_n_x = 20
+        self.action_n_y = 20
+        if self.envs.action_space[0].__class__.__name__ == "MultiDiscrete":
+            action_dims = self.envs.action_space[0].high - self.envs.action_space[0].low + 1
+            self.action_n_x = int(action_dims[0])
+            self.action_n_y = int(action_dims[1])
         self.action_masker = CBFDiscreteActionMask(
             CBFActionMaskConfig(
+                n_x=self.action_n_x,
+                n_y=self.action_n_y,
                 k1=getattr(self.all_args, "cbf_k1", 2.0),
                 k2=getattr(self.all_args, "cbf_k2", 2.0),
                 h_keep=getattr(self.all_args, "h_keep", 0.05),
@@ -328,10 +336,11 @@ class GSMPERunner(Runner):
         else:
             raise NotImplementedError
 
-        actions_rl_cont = discrete_actions_to_accel(actions)
+        action_bins = (self.action_n_x, self.action_n_y)
+        actions_rl_cont = discrete_actions_to_accel(actions, n_bins=action_bins)
         actions_safe_cont = actions_rl_cont.copy()
         self.last_actions_norm = actions_rl_cont.copy()
-        joint_actions = (actions[:, :, 0:1] * 20 + actions[:, :, 1:2]).astype(np.int32)
+        joint_actions = (actions[:, :, 0:1] * self.action_n_y + actions[:, :, 1:2]).astype(np.int32)
         cbf_diag = np.zeros((self.n_rollout_threads, self.num_agents, 6), dtype=np.float32)
         if self.use_cbf_filter and self.use_continuous_cbf_filter:
             priorities_t, gammas_t = self.trainer.policy.safety_edge_scores(
@@ -388,7 +397,7 @@ class GSMPERunner(Runner):
                 cbf_diag[env_id, :, 3] = info["qp_infeasible"]
                 cbf_diag[env_id, :, 4] = float(np.mean(risks) if risks else 0.0)
                 cbf_diag[env_id, :, 5] = gamma_delta / max(gamma_count, 1)
-            actions_env = accel_to_multidiscrete_action(actions_safe_cont)
+            actions_env = accel_to_multidiscrete_action(actions_safe_cont, n_bins=action_bins)
 
         return (
             values,

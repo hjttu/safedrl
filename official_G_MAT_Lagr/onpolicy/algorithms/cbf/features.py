@@ -65,26 +65,42 @@ def build_cbf_edge_matrix(world, d_safe_agent: float, d_safe_obstacle: float) ->
 
 def risk_from_cbf(h: float, hdot: float, ttc: float, d_safe: float) -> float:
     h_scale = max(d_safe * d_safe, 1e-6)
-    h_risk = 1.0 / (1.0 + np.exp(4.0 * h / h_scale))
-    closing_risk = 1.0 / (1.0 + np.exp(2.0 * hdot / h_scale))
+    h_arg = np.clip(4.0 * h / h_scale, -60.0, 60.0)
+    hdot_arg = np.clip(2.0 * hdot / h_scale, -60.0, 60.0)
+    h_risk = 1.0 / (1.0 + np.exp(h_arg))
+    closing_risk = 1.0 / (1.0 + np.exp(hdot_arg))
     ttc_risk = np.exp(-max(ttc, 0.0) / 2.0)
     return float(np.clip(0.45 * h_risk + 0.35 * closing_risk + 0.20 * ttc_risk, 0.0, 1.0))
 
 
-def discrete_actions_to_accel(actions: np.ndarray, n_bins: int = 20) -> np.ndarray:
-    mapping = np.linspace(-1.0, 1.0, n_bins, dtype=np.float32)
+def _axis_bins(n_bins: int | tuple[int, int]) -> tuple[int, int]:
+    if np.isscalar(n_bins):
+        return int(n_bins), int(n_bins)
+    return int(n_bins[0]), int(n_bins[1])
+
+
+def discrete_actions_to_accel(actions: np.ndarray, n_bins: int | tuple[int, int] = 20) -> np.ndarray:
+    n_x, n_y = _axis_bins(n_bins)
+    mapping_x = np.linspace(-1.0, 1.0, n_x, dtype=np.float32)
+    mapping_y = np.linspace(-1.0, 1.0, n_y, dtype=np.float32)
     actions = np.asarray(actions)
-    return np.stack([mapping[actions[..., 0].astype(int)], mapping[actions[..., 1].astype(int)]], axis=-1)
+    return np.stack([mapping_x[actions[..., 0].astype(int)], mapping_y[actions[..., 1].astype(int)]], axis=-1)
 
 
-def accel_to_multidiscrete_action(accel: np.ndarray, n_bins: int = 20) -> np.ndarray:
+def accel_to_multidiscrete_action(accel: np.ndarray, n_bins: int | tuple[int, int] = 20) -> np.ndarray:
     """Encode continuous normalized acceleration as one-hot MultiDiscrete env action."""
-    mapping = np.linspace(-1.0, 1.0, n_bins, dtype=np.float32)
+    n_x, n_y = _axis_bins(n_bins)
+    mappings = (
+        np.linspace(-1.0, 1.0, n_x, dtype=np.float32),
+        np.linspace(-1.0, 1.0, n_y, dtype=np.float32),
+    )
     accel = np.clip(np.asarray(accel, dtype=np.float32), -1.0, 1.0)
-    idx = np.abs(accel[..., None] - mapping).argmin(axis=-1)
-    out_shape = accel.shape[:-1] + (2 * n_bins,)
+    idx_x = np.abs(accel[..., 0, None] - mappings[0]).argmin(axis=-1)
+    idx_y = np.abs(accel[..., 1, None] - mappings[1]).argmin(axis=-1)
+    out_shape = accel.shape[:-1] + (n_x + n_y,)
     one_hot = np.zeros(out_shape, dtype=np.float32)
-    for axis in range(2):
-        flat = one_hot[..., axis * n_bins : (axis + 1) * n_bins].reshape(-1, n_bins)
-        flat[np.arange(flat.shape[0]), idx[..., axis].reshape(-1)] = 1.0
+    flat_x = one_hot[..., :n_x].reshape(-1, n_x)
+    flat_x[np.arange(flat_x.shape[0]), idx_x.reshape(-1)] = 1.0
+    flat_y = one_hot[..., n_x : n_x + n_y].reshape(-1, n_y)
+    flat_y[np.arange(flat_y.shape[0]), idx_y.reshape(-1)] = 1.0
     return one_hot

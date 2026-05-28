@@ -152,9 +152,14 @@ class Runner(object):
         """Train policies with data in buffer, including safety-related data."""
         self.trainer.prep_training()
         # Initialize factor for Lagrangian method
-        action_dim = self.buffer.actions.shape[-1]
+        action_dim = self.buffer.action_log_probs.shape[-1]
         factor = np.ones((self.episode_length, self.n_rollout_threads, self.num_agents, action_dim), dtype=np.float32)
         self.buffer.update_factor(factor)
+        available_actions = None
+        if self.buffer.available_actions is not None:
+            available_actions = self.buffer.available_actions[:-1].reshape(
+                -1, self.buffer.available_actions.shape[-1]
+            )
 
         old_actions_logprob, _ = self.trainer.policy.actor.evaluate_actions(
             self.buffer.obs[:-1].reshape(-1, *self.buffer.obs.shape[3:]),
@@ -164,7 +169,7 @@ class Runner(object):
             self.buffer.rnn_states[0:1].reshape(-1, *self.buffer.rnn_states.shape[3:]),
             self.buffer.actions.reshape(-1, *self.buffer.actions.shape[3:]),
             self.buffer.masks[:-1].reshape(-1, *self.buffer.masks.shape[3:]),
-            available_actions=self.buffer.available_actions[:-1],
+            available_actions=available_actions,
             active_masks=self.buffer.active_masks[:-1].reshape(-1, *self.buffer.active_masks.shape[3:])
         )
 
@@ -180,7 +185,7 @@ class Runner(object):
             self.buffer.rnn_states[0:1].reshape(-1, *self.buffer.rnn_states.shape[3:]),
             self.buffer.actions.reshape(-1, *self.buffer.actions.shape[3:]),
             self.buffer.masks[:-1].reshape(-1, *self.buffer.masks.shape[3:]),
-            available_actions=self.buffer.available_actions[:-1],
+            available_actions=available_actions,
             active_masks=self.buffer.active_masks[:-1].reshape(-1, *self.buffer.active_masks.shape[3:])
         )
 
