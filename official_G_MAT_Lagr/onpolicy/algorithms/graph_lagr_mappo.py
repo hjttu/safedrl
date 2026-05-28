@@ -405,7 +405,11 @@ class GS_MAPPO():
             elif self._use_naive_recurrent:
                 data_generator = buffer.naive_recurrent_generator(advantages, self.num_mini_batch, cost_adv=cost_adv)
             else:
-                data_generator = buffer.feed_forward_generator(advantages, self.num_mini_batch, mini_batch_size=self.data_chunks//self.num_mini_batch, cost_adv=cost_adv)
+                data_generator = buffer.feed_forward_generator(
+                    advantages,
+                    self.num_mini_batch,
+                    cost_adv=cost_adv,
+                )
 
             for sample in data_generator:
                 value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, imp_weights, cost_loss, cost_grad_norm, aver_episode_costs, cost_adv_targ, adv_targ, int_loss, trm_loss = self.ppo_update(sample, update_actor)
