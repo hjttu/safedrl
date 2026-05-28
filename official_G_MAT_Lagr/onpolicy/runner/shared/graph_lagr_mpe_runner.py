@@ -685,16 +685,11 @@ class GSMPERunner(Runner):
 
             eval_dones_env = np.all(eval_dones, axis=1)
 
-            eval_rnn_states[eval_dones_env == True] = np.zeros(
-                ((eval_dones_env == True).sum(), self.recurrent_N, self.hidden_size),
-                dtype=np.float32,
-            )
+            eval_rnn_states[eval_dones_env == True] = 0.0
             eval_masks = np.ones(
                 (self.n_eval_rollout_threads, self.num_agents, 1), dtype=np.float32
             )
-            eval_masks[eval_dones_env == True] = np.zeros(
-                ((eval_dones_env == True).sum(), 1), dtype=np.float32
-            )
+            eval_masks[eval_dones_env == True] = 0.0
 
             for eval_i in range(self.n_eval_rollout_threads):
                 if eval_dones_env[eval_i]:
