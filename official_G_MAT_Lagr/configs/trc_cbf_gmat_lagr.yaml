@@ -4,6 +4,8 @@ scenario_name: graph_navigation_3agts
 graph_feat_type: global
 use_att_gnn: false
 use_cbf_filter: true
+use_cbf_action_mask: false
+use_continuous_cbf_filter: false
 use_attention_priority: true
 use_responsibility: true
 use_trm: true
@@ -24,6 +26,13 @@ lambda_trm: 0.05
 lambda_guide_init: 0.2
 guide_schedule_type: s_curve
 eval_hard_filter: true
+action_mask_hard: true
+action_mask_soft_penalty: true
+h_keep: 0.05
+tau_ttc: 1.0
+lambda_soft_mask: 1.0
+empty_mask_fallback: min_violation
+neighbor_action_mode: zero
 deadlock_speed_thresh: 0.03
 deadlock_goal_dist: 0.3
 deadlock_near_h: 0.05

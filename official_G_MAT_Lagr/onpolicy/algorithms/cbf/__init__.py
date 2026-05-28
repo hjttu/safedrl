@@ -5,6 +5,7 @@ from .features import (
     accel_to_multidiscrete_action,
 )
 from .hocbf_filter import HOCBFSafetyFilter
+from .discrete_action_mask import CBFActionMaskConfig, CBFDiscreteActionMask
 from .temporal_responsibility_memory import TemporalResponsibilityMemory
 
 __all__ = [
@@ -13,5 +14,7 @@ __all__ = [
     "discrete_actions_to_accel",
     "accel_to_multidiscrete_action",
     "HOCBFSafetyFilter",
+    "CBFActionMaskConfig",
+    "CBFDiscreteActionMask",
     "TemporalResponsibilityMemory",
 ]

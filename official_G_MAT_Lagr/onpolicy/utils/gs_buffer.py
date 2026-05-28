@@ -152,7 +152,14 @@ class GSReplayBuffer(object):
         self.cost_returns = np.zeros_like(self.returns)  # Added for cost returns
 
         # Action-related storage
-        if act_space.__class__.__name__ == "Discrete":
+        self.use_cbf_action_mask = getattr(args, "use_cbf_action_mask", False)
+        if self.use_cbf_action_mask and act_space.__class__.__name__ == "MultiDiscrete":
+            joint_dim = int((act_space.high[0] - act_space.low[0] + 1) * (act_space.high[1] - act_space.low[1] + 1))
+            self.available_actions = np.ones(
+                (self.episode_length + 1, self.n_rollout_threads, num_agents, joint_dim * 2),
+                dtype=np.float32,
+            )
+        elif act_space.__class__.__name__ == "Discrete":
             self.available_actions = np.ones(
                 (
                     self.episode_length + 1,
@@ -190,8 +197,17 @@ class GSReplayBuffer(object):
             (self.episode_length, self.n_rollout_threads, num_agents, 6),
             dtype=np.float32,
         )
+        self.action_mask_diag = np.zeros(
+            (self.episode_length, self.n_rollout_threads, num_agents, 8),
+            dtype=np.float32,
+        )
+        self.joint_actions = np.zeros(
+            (self.episode_length, self.n_rollout_threads, num_agents, 1),
+            dtype=np.int32,
+        )
+        action_log_prob_shape = 1 if self.use_cbf_action_mask else act_shape
         self.action_log_probs = np.zeros(
-            (self.episode_length, self.n_rollout_threads, num_agents, act_shape),
+            (self.episode_length, self.n_rollout_threads, num_agents, action_log_prob_shape),
             dtype=np.float32,
         )
         self.rewards = np.zeros(
@@ -250,6 +266,8 @@ class GSReplayBuffer(object):
         actions_rl_cont: np.ndarray = None,
         actions_safe_cont: np.ndarray = None,
         cbf_diag: np.ndarray = None,
+        action_mask_diag: np.ndarray = None,
+        joint_actions: np.ndarray = None,
     ) -> None:
         """
         Insert data into the replay buffer, including safety-related data.
@@ -269,6 +287,10 @@ class GSReplayBuffer(object):
             self.actions_safe_cont[self.step] = actions_safe_cont.copy()
         if cbf_diag is not None:
             self.cbf_diag[self.step] = cbf_diag.copy()
+        if action_mask_diag is not None:
+            self.action_mask_diag[self.step] = action_mask_diag.copy()
+        if joint_actions is not None:
+            self.joint_actions[self.step] = joint_actions.copy()
         self.action_log_probs[self.step] = action_log_probs.copy()
         self.value_preds[self.step] = value_preds.copy()
         self.rewards[self.step] = rewards.copy()
@@ -278,7 +300,10 @@ class GSReplayBuffer(object):
         if active_masks is not None:
             self.active_masks[self.step + 1] = active_masks.copy()
         if available_actions is not None:
-            self.available_actions[self.step + 1] = available_actions.copy()
+            if self.use_cbf_action_mask:
+                self.available_actions[self.step] = available_actions.copy()
+            else:
+                self.available_actions[self.step + 1] = available_actions.copy()
         if costs is not None:
             self.costs[self.step] = costs.copy()
         if cost_preds is not None:

@@ -264,6 +264,8 @@ def get_config():
     # TRC-CBF-GMATrans-Lagr safety module. All switches default to False so the
     # original G-MATrans-Lagr path remains unchanged.
     parser.add_argument("--use_cbf_filter", type=lambda x: bool(strtobool(x)), default=False)
+    parser.add_argument("--use_cbf_action_mask", type=lambda x: bool(strtobool(x)), default=False)
+    parser.add_argument("--use_continuous_cbf_filter", type=lambda x: bool(strtobool(x)), default=False)
     parser.add_argument("--use_attention_priority", type=lambda x: bool(strtobool(x)), default=False)
     parser.add_argument("--use_responsibility", type=lambda x: bool(strtobool(x)), default=False)
     parser.add_argument("--use_trm", type=lambda x: bool(strtobool(x)), default=False)
@@ -284,6 +286,13 @@ def get_config():
     parser.add_argument("--lambda_guide_init", type=float, default=0.0)
     parser.add_argument("--guide_schedule_type", type=str, default="s_curve", choices=["s_curve", "linear", "constant"])
     parser.add_argument("--eval_hard_filter", type=lambda x: bool(strtobool(x)), default=True)
+    parser.add_argument("--action_mask_hard", type=lambda x: bool(strtobool(x)), default=True)
+    parser.add_argument("--action_mask_soft_penalty", type=lambda x: bool(strtobool(x)), default=True)
+    parser.add_argument("--h_keep", type=float, default=0.05)
+    parser.add_argument("--tau_ttc", type=float, default=1.0)
+    parser.add_argument("--lambda_soft_mask", type=float, default=1.0)
+    parser.add_argument("--empty_mask_fallback", type=str, default="min_violation", choices=["min_violation", "brake"])
+    parser.add_argument("--neighbor_action_mode", type=str, default="zero", choices=["zero", "last", "nominal"])
     parser.add_argument("--deadlock_speed_thresh", type=float, default=0.03)
     parser.add_argument("--deadlock_goal_dist", type=float, default=0.3)
     parser.add_argument("--deadlock_near_h", type=float, default=0.05)

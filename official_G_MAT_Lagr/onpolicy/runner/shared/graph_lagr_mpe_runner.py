@@ -14,6 +14,7 @@ from onpolicy.algorithms.cbf.features import (
     risk_from_cbf,
 )
 from onpolicy.algorithms.cbf.hocbf_filter import HOCBFSafetyFilter, HOCBFParams
+from onpolicy.algorithms.cbf.discrete_action_mask import CBFActionMaskConfig, CBFDiscreteActionMask
 from onpolicy.algorithms.cbf.temporal_responsibility_memory import TemporalResponsibilityMemory
 
 
@@ -36,6 +37,8 @@ class GSMPERunner(Runner):
         self.reward_file_name = self.all_args.reward_file_name
         self.cost_file_name = self.all_args.cost_file_name
         self.use_cbf_filter = getattr(self.all_args, "use_cbf_filter", False)
+        self.use_cbf_action_mask = getattr(self.all_args, "use_cbf_action_mask", False)
+        self.use_continuous_cbf_filter = getattr(self.all_args, "use_continuous_cbf_filter", False)
         self.trm = TemporalResponsibilityMemory(
             beta_min=getattr(self.all_args, "beta_min", 0.2),
             beta_max=getattr(self.all_args, "beta_max", 0.95),
@@ -51,6 +54,22 @@ class GSMPERunner(Runner):
                 eval_hard_filter=getattr(self.all_args, "eval_hard_filter", True),
             )
         )
+        self.action_masker = CBFDiscreteActionMask(
+            CBFActionMaskConfig(
+                k1=getattr(self.all_args, "cbf_k1", 2.0),
+                k2=getattr(self.all_args, "cbf_k2", 2.0),
+                h_keep=getattr(self.all_args, "h_keep", 0.05),
+                tau_ttc=getattr(self.all_args, "tau_ttc", 1.0),
+                d_safe_agent=getattr(self.all_args, "d_safe_agent", 0.25),
+                d_safe_obstacle=getattr(self.all_args, "d_safe_obstacle", 0.30),
+                lambda_soft_mask=getattr(self.all_args, "lambda_soft_mask", 1.0),
+                action_mask_hard=getattr(self.all_args, "action_mask_hard", True),
+                action_mask_soft_penalty=getattr(self.all_args, "action_mask_soft_penalty", True),
+                neighbor_action_mode=getattr(self.all_args, "neighbor_action_mode", "zero"),
+                empty_mask_fallback=getattr(self.all_args, "empty_mask_fallback", "min_violation"),
+            )
+        )
+        self.last_actions_norm = np.zeros((self.n_rollout_threads, self.num_agents, 2), dtype=np.float32)
         if self.use_train_render:
             print("render the image while training")
 
@@ -95,6 +114,9 @@ class GSMPERunner(Runner):
                     actions_rl_cont,
                     actions_safe_cont,
                     cbf_diag,
+                    action_mask_diag,
+                    action_mask,
+                    joint_actions,
                     cost_preds,
                     rnn_states_cost,
                 ) = self.collect(step)
@@ -121,6 +143,9 @@ class GSMPERunner(Runner):
                     actions_rl_cont,
                     actions_safe_cont,
                     cbf_diag,
+                    action_mask_diag,
+                    action_mask,
+                    joint_actions,
                     cost_preds,
                     rnn_states_cost
                 )
@@ -164,6 +189,16 @@ class GSMPERunner(Runner):
                     dist_adj = self.buffer.adj[..., 0] if self.buffer.adj.ndim == 6 else self.buffer.adj
                     masked = dist_adj[(dist_adj > 0) & (dist_adj < self.all_args.max_edge_dist)]
                     train_infos["min_inter_agent_distance"] = float(np.min(masked)) if masked.size else 0.0
+                if self.use_cbf_action_mask:
+                    mdiag = self.buffer.action_mask_diag
+                    train_infos["safe_action_ratio"] = float(np.mean(mdiag[..., 0]))
+                    train_infos["empty_mask_rate"] = float(np.mean(mdiag[..., 1]))
+                    train_infos["average_num_safe_actions"] = float(np.mean(mdiag[..., 2]))
+                    train_infos["min_num_safe_actions"] = float(np.min(mdiag[..., 3]))
+                    train_infos["action_mask_entropy"] = float(np.mean(mdiag[..., 4]))
+                    train_infos["hard_violation_min"] = float(np.min(mdiag[..., 5]))
+                    train_infos["soft_risk_penalty_mean"] = float(np.mean(mdiag[..., 6]))
+                    train_infos["fallback_action_rate"] = float(np.mean(mdiag[..., 7]))
       
                 print("\n Scenario {} Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}, CL {}.\n"
                         .format(self.all_args.scenario_name,
@@ -231,6 +266,20 @@ class GSMPERunner(Runner):
     @torch.no_grad()
     def collect(self, step: int) -> Tuple[arr, arr, arr, arr, arr, arr, arr, arr]:
         self.trainer.prep_rollout()
+        action_mask = None
+        action_mask_diag = np.zeros((self.n_rollout_threads, self.num_agents, 8), dtype=np.float32)
+        if self.use_cbf_action_mask:
+            mask, soft_penalty, action_mask_diag = self.action_masker.build_batch(
+                self.buffer.node_obs[step],
+                self.buffer.adj[step],
+                agent_max_accel=0.5,
+                last_actions_norm=self.last_actions_norm,
+            )
+            if getattr(self.all_args, "action_mask_soft_penalty", True):
+                action_mask = np.concatenate([mask, self.all_args.lambda_soft_mask * soft_penalty], axis=-1)
+            else:
+                action_mask = np.concatenate([mask, np.zeros_like(soft_penalty)], axis=-1)
+
         (
             value,
             action,
@@ -250,6 +299,7 @@ class GSMPERunner(Runner):
             np.concatenate(self.buffer.rnn_states_critic[step]),
             np.concatenate(self.buffer.masks[step]),
             np.concatenate(self.buffer.rnn_states_cost[step]),
+            available_actions=None if action_mask is None else np.concatenate(action_mask),
         )
         # print("cost_preds:", cost_preds)  # DEBUG
         # [self.envs, agents, dim]
@@ -280,8 +330,10 @@ class GSMPERunner(Runner):
 
         actions_rl_cont = discrete_actions_to_accel(actions)
         actions_safe_cont = actions_rl_cont.copy()
+        self.last_actions_norm = actions_rl_cont.copy()
+        joint_actions = (actions[:, :, 0:1] * 20 + actions[:, :, 1:2]).astype(np.int32)
         cbf_diag = np.zeros((self.n_rollout_threads, self.num_agents, 6), dtype=np.float32)
-        if self.use_cbf_filter:
+        if self.use_cbf_filter and self.use_continuous_cbf_filter:
             priorities_t, gammas_t = self.trainer.policy.safety_edge_scores(
                 np.concatenate(self.buffer.adj[step])
             )
@@ -348,6 +400,9 @@ class GSMPERunner(Runner):
             actions_rl_cont,
             actions_safe_cont,
             cbf_diag,
+            action_mask_diag,
+            action_mask,
+            joint_actions,
             cost_preds,
             rnn_states_cost,
         )
@@ -370,6 +425,9 @@ class GSMPERunner(Runner):
             actions_rl_cont,
             actions_safe_cont,
             cbf_diag,
+            action_mask_diag,
+            action_mask,
+            joint_actions,
             cost_preds,
             rnn_states_cost,
         ) = data
@@ -426,6 +484,9 @@ class GSMPERunner(Runner):
             actions_rl_cont=actions_rl_cont,
             actions_safe_cont=actions_safe_cont,
             cbf_diag=cbf_diag,
+            action_mask_diag=action_mask_diag,
+            available_actions=action_mask,
+            joint_actions=joint_actions,
         )
 
     @torch.no_grad()

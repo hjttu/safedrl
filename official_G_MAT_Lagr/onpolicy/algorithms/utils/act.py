@@ -6,6 +6,7 @@ masks to re-normalise the probability distributions
 from .distributions import Bernoulli, Categorical, DiagGaussian
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
 
 
@@ -92,6 +93,27 @@ class ACTLayer(nn.Module):
             action_log_probs = torch.sum(
                 torch.cat(action_log_probs, -1), -1, keepdim=True
             )
+
+        elif self.multi_discrete and available_actions is not None and available_actions.shape[-1] > len(self.action_outs):
+            logits_x = self.action_outs[0].linear(x)
+            logits_y = self.action_outs[1].linear(x)
+            logits_x = torch.nan_to_num(logits_x, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
+            logits_y = torch.nan_to_num(logits_y, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
+            joint_logits = logits_x.unsqueeze(2) + logits_y.unsqueeze(1)
+            batch_size, n_x, n_y = joint_logits.shape
+            joint_logits = joint_logits.reshape(batch_size, n_x * n_y)
+            if available_actions.shape[-1] == 2 * joint_logits.shape[-1]:
+                mask, soft_penalty = torch.chunk(available_actions, 2, dim=-1)
+                joint_logits = joint_logits - soft_penalty
+            else:
+                mask = available_actions
+            joint_logits = joint_logits.masked_fill(mask <= 0, torch.finfo(joint_logits.dtype).min)
+            action_logit = torch.distributions.Categorical(logits=joint_logits)
+            joint_action = joint_logits.argmax(dim=-1) if deterministic else action_logit.sample()
+            ax = torch.div(joint_action, n_y, rounding_mode="floor")
+            ay = joint_action % n_y
+            actions = torch.stack([ax, ay], dim=-1)
+            action_log_probs = action_logit.log_prob(joint_action).unsqueeze(-1)
 
         elif self.multi_discrete:
             actions = []
@@ -192,6 +214,29 @@ class ACTLayer(nn.Module):
             dist_entropy = (
                 dist_entropy[0] / 2.0 + dist_entropy[1] / 0.98
             )  #! dosen't make sense
+
+        elif self.multi_discrete and available_actions is not None and available_actions.shape[-1] > len(self.action_outs):
+            logits_x = self.action_outs[0].linear(x)
+            logits_y = self.action_outs[1].linear(x)
+            logits_x = torch.nan_to_num(logits_x, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
+            logits_y = torch.nan_to_num(logits_y, nan=0.0, posinf=20.0, neginf=-20.0).clamp(-20.0, 20.0)
+            joint_logits = logits_x.unsqueeze(2) + logits_y.unsqueeze(1)
+            batch_size, n_x, n_y = joint_logits.shape
+            joint_logits = joint_logits.reshape(batch_size, n_x * n_y)
+            if available_actions.shape[-1] == 2 * joint_logits.shape[-1]:
+                mask, soft_penalty = torch.chunk(available_actions, 2, dim=-1)
+                joint_logits = joint_logits - soft_penalty
+            else:
+                mask = available_actions
+            joint_logits = joint_logits.masked_fill(mask <= 0, torch.finfo(joint_logits.dtype).min)
+            action_dist = torch.distributions.Categorical(logits=joint_logits)
+            joint_action = action[:, 0].long() * n_y + action[:, 1].long()
+            action_log_probs = action_dist.log_prob(joint_action).unsqueeze(-1)
+            entropy = action_dist.entropy()
+            if active_masks is not None:
+                dist_entropy = (entropy * active_masks.squeeze(-1)).sum() / active_masks.sum()
+            else:
+                dist_entropy = entropy.mean()
 
         elif self.multi_discrete:
             action = torch.transpose(action, 0, 1)
