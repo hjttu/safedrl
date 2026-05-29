@@ -82,6 +82,7 @@ class GSMPERunner(Runner):
                 guide_tau=getattr(self.all_args, "guide_tau", 0.5),
                 semi_hard_mask=getattr(self.all_args, "semi_hard_mask", True),
                 guide_fallback_topk=getattr(self.all_args, "guide_fallback_topk", 5),
+                hard_phi_margin=getattr(self.all_args, "hard_phi_margin", 0.3),
             )
         )
         self.last_actions_norm = np.zeros((self.n_rollout_threads, self.num_agents, 2), dtype=np.float32)
@@ -101,7 +102,10 @@ class GSMPERunner(Runner):
         guide_decay_ratio = max(float(getattr(self.all_args, "guide_decay_ratio", 0.6)), 1e-6)
         warmup_ratio = float(getattr(self.all_args, "cbf_warmup_ratio", 0.2))
         warmup_denom = max(1.0 - warmup_ratio, 1e-6)
-        alpha_t = float(getattr(self.all_args, "guide_alpha_init", 1.0)) * max(0.0, 1.0 - progress / guide_decay_ratio)
+        guide_alpha_init = float(getattr(self.all_args, "guide_alpha_init", 1.0))
+        guide_alpha_final = float(getattr(self.all_args, "guide_alpha_final", 0.0))
+        decay = max(0.0, 1.0 - progress / guide_decay_ratio)
+        alpha_t = guide_alpha_final + (guide_alpha_init - guide_alpha_final) * decay
         beta_t = float(getattr(self.all_args, "cbf_beta_init", 0.02)) + (
             float(getattr(self.all_args, "cbf_beta_final", 0.5)) - float(getattr(self.all_args, "cbf_beta_init", 0.02))
         ) * _smoothstep(max(0.0, (progress - warmup_ratio) / warmup_denom))
@@ -113,6 +117,54 @@ class GSMPERunner(Runner):
             float(getattr(self.all_args, "min_valid_action_ratio_final", 0.3)) - float(getattr(self.all_args, "min_valid_action_ratio_init", 0.7))
         ) * _smoothstep(progress)
         return progress, alpha_t, beta_t, h_keep_t, hard_enabled, min_valid_ratio
+
+    def _build_pg_cbf_available_actions(
+        self,
+        node_obs,
+        adj,
+        total_num_steps,
+        envs,
+        n_threads,
+        last_actions_norm=None,
+        update_stats=False,
+    ):
+        _, alpha_t, beta_t, h_keep_t, hard_enabled, min_valid_ratio = self._pg_cbf_schedule(
+            total_num_steps
+        )
+        guide_actions_norm = (
+            self._get_guide_actions_norm(envs, n_threads)
+            if getattr(self.all_args, "use_cbf_guide", False)
+            else None
+        )
+        mask, risk_penalty, guide_logits, action_mask_diag = self.action_masker.build_batch(
+            node_obs,
+            adj,
+            agent_max_accel=getattr(self.all_args, "cbf_action_accel_scale", 1.0),
+            last_actions_norm=last_actions_norm,
+            guide_actions_norm=guide_actions_norm,
+            hard_enabled=hard_enabled,
+            h_keep=h_keep_t,
+            semi_hard_mask=getattr(self.all_args, "semi_hard_mask", True),
+            min_valid_action_ratio=min_valid_ratio,
+            guide_fallback_topk=getattr(self.all_args, "guide_fallback_topk", 5),
+        )
+        if getattr(self.all_args, "action_mask_soft_penalty", True):
+            available_actions = np.concatenate(
+                [mask, beta_t * risk_penalty, alpha_t * guide_logits], axis=-1
+            )
+        else:
+            available_actions = np.concatenate(
+                [mask, np.zeros_like(risk_penalty), alpha_t * guide_logits], axis=-1
+            )
+        if update_stats:
+            self.last_pg_cbf_stats = {
+                "guide_alpha": float(alpha_t),
+                "cbf_beta": float(beta_t),
+                "h_keep_current": float(h_keep_t),
+                "hard_mask_enabled": float(hard_enabled),
+                "min_valid_action_ratio": float(min_valid_ratio),
+            }
+        return available_actions, action_mask_diag
 
     def run(self):
         if self.save_data:
@@ -327,33 +379,15 @@ class GSMPERunner(Runner):
         action_mask = None
         action_mask_diag = np.zeros((self.n_rollout_threads, self.num_agents, 8), dtype=np.float32)
         if self.use_cbf_action_mask:
-            _, alpha_t, beta_t, h_keep_t, hard_enabled, min_valid_ratio = self._pg_cbf_schedule(
-                self.current_total_num_steps
-            )
-            guide_actions_norm = self._get_guide_actions_norm() if getattr(self.all_args, "use_cbf_guide", False) else None
-            mask, risk_penalty, guide_logits, action_mask_diag = self.action_masker.build_batch(
+            action_mask, action_mask_diag = self._build_pg_cbf_available_actions(
                 self.buffer.node_obs[step],
                 self.buffer.adj[step],
-                agent_max_accel=0.5,
+                self.current_total_num_steps,
+                self.envs,
+                self.n_rollout_threads,
                 last_actions_norm=self.last_actions_norm,
-                guide_actions_norm=guide_actions_norm,
-                hard_enabled=hard_enabled,
-                h_keep=h_keep_t,
-                semi_hard_mask=getattr(self.all_args, "semi_hard_mask", True),
-                min_valid_action_ratio=min_valid_ratio,
-                guide_fallback_topk=getattr(self.all_args, "guide_fallback_topk", 5),
+                update_stats=True,
             )
-            if getattr(self.all_args, "action_mask_soft_penalty", True):
-                action_mask = np.concatenate([mask, beta_t * risk_penalty, alpha_t * guide_logits], axis=-1)
-            else:
-                action_mask = np.concatenate([mask, np.zeros_like(risk_penalty), alpha_t * guide_logits], axis=-1)
-            self.last_pg_cbf_stats = {
-                "guide_alpha": float(alpha_t),
-                "cbf_beta": float(beta_t),
-                "h_keep_current": float(h_keep_t),
-                "hard_mask_enabled": float(hard_enabled),
-                "min_valid_action_ratio": float(min_valid_ratio),
-            }
 
         (
             value,
@@ -483,14 +517,16 @@ class GSMPERunner(Runner):
             rnn_states_cost,
         )
 
-    def _get_guide_actions_norm(self):
-        if not hasattr(self.envs, "get_guide_actions"):
-            return np.zeros((self.n_rollout_threads, self.num_agents, 2), dtype=np.float32)
-        guide = np.asarray(self.envs.get_guide_actions(), dtype=np.float32)
+    def _get_guide_actions_norm(self, envs=None, n_threads=None):
+        envs = self.envs if envs is None else envs
+        n_threads = self.n_rollout_threads if n_threads is None else n_threads
+        if not hasattr(envs, "get_guide_actions"):
+            return np.zeros((n_threads, self.num_agents, 2), dtype=np.float32)
+        guide = np.asarray(envs.get_guide_actions(), dtype=np.float32)
         if guide.ndim == 4 and guide.shape[-1] == 1:
             guide = guide[..., 0]
-        if guide.shape != (self.n_rollout_threads, self.num_agents, 2):
-            guide = guide.reshape(self.n_rollout_threads, self.num_agents, 2)
+        if guide.shape != (n_threads, self.num_agents, 2):
+            guide = guide.reshape(n_threads, self.num_agents, 2)
         return np.clip(guide, -1.0, 1.0).astype(np.float32)
 
     def insert(self, data):
@@ -629,9 +665,23 @@ class GSMPERunner(Runner):
         eval_masks = np.ones(
             (self.n_eval_rollout_threads, self.num_agents, 1), dtype=np.float32
         )
+        eval_last_actions_norm = np.zeros(
+            (self.n_eval_rollout_threads, self.num_agents, 2), dtype=np.float32
+        )
 
         while True:
             self.trainer.prep_rollout()
+            eval_available_actions = None
+            if self.use_cbf_action_mask:
+                eval_available_actions, _ = self._build_pg_cbf_available_actions(
+                    eval_node_obs,
+                    eval_adj,
+                    total_num_steps,
+                    self.eval_envs,
+                    self.n_eval_rollout_threads,
+                    last_actions_norm=eval_last_actions_norm,
+                    update_stats=False,
+                )
             eval_action, eval_rnn_states = self.trainer.policy.act(
                 np.concatenate(eval_obs),
                 np.concatenate(eval_node_obs),
@@ -639,6 +689,7 @@ class GSMPERunner(Runner):
                 np.concatenate(eval_agent_id),
                 np.concatenate(eval_rnn_states),
                 np.concatenate(eval_masks),
+                available_actions=None if eval_available_actions is None else np.concatenate(eval_available_actions),
                 deterministic=True,
             )
             eval_actions = np.array(
@@ -647,6 +698,8 @@ class GSMPERunner(Runner):
             eval_rnn_states = np.array(
                 np.split(_t2n(eval_rnn_states), self.n_eval_rollout_threads)
             )
+            action_bins = (self.action_n_x, self.action_n_y)
+            eval_last_actions_norm = discrete_actions_to_accel(eval_actions, n_bins=action_bins)
 
             if self.eval_envs.action_space[0].__class__.__name__ == "MultiDiscrete":
                 for i in range(self.eval_envs.action_space[0].shape):

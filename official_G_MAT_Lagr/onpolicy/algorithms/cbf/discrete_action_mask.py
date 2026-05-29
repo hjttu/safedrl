@@ -27,6 +27,7 @@ class CBFActionMaskConfig:
     semi_hard_mask: bool = True
     min_valid_action_ratio: float = 0.3
     guide_fallback_topk: int = 5
+    hard_phi_margin: float = 0.3
 
 
 class CBFDiscreteActionMask:
@@ -152,7 +153,7 @@ class CBFDiscreteActionMask:
             if is_hard and hard_enabled:
                 hard_edges += 1
                 if semi_hard_mask:
-                    hard_invalid |= phi < -abs(h_keep)
+                    hard_invalid |= phi < -abs(float(self.cfg.hard_phi_margin))
                 else:
                     hard_invalid |= phi < 0.0
             else:

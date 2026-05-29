@@ -85,9 +85,11 @@ class GS_MAPPO():
         self.lambda_trm = getattr(args, "lambda_trm", 0.0)
         self.lambda_guide_init = getattr(args, "lambda_guide_init", 0.0)
         self.guide_loss_decay_ratio = getattr(args, "guide_loss_decay_ratio", 0.4)
-        # TODO(PG-CBF-AM): add optional early guide CE/KL imitation on raw joint
-        # logits. The current implementation keeps the default update unchanged
-        # and applies guide information only through rollout/evaluate logits.
+        # TODO(PG-CBF-AM): add optional early guide CE/KL imitation on raw
+        # policy joint logits, using lambda_guide_init *
+        # max(0, 1 - progress / guide_loss_decay_ratio). This needs a raw
+        # joint-logits actor API and guide targets in the buffer; keeping it
+        # disabled here preserves the main PPO distribution path.
 
         # Value and cost normalizers
         if self._use_popart:
