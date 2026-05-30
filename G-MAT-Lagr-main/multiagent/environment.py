@@ -722,6 +722,24 @@ class MultiAgentGraphEnv(MultiAgentBaseEnv):
         # print("edge_observation_space: ", self.edge_observation_space[0])  # (1, )
         # print("adj_observation_space: ", self.adj_observation_space[0])  # (13, 13)
 
+    def get_soft_action_bias(self):
+        """
+        Return np.ndarray with shape (num_agents, 2, 20).
+        If soft mask is disabled, return zeros.
+        """
+        if not getattr(self.args, "use_soft_action_mask", False):
+            return np.zeros((self.num_agents, 2, 20), dtype=np.float32)
+
+        from .safety_filter import compute_soft_action_bias
+
+        if self.update_graph is not None:
+            self.update_graph(self.world)
+
+        biases = []
+        for agent in self.world.policy_agents:
+            biases.append(compute_soft_action_bias(agent, self.world, self.args))
+        return np.asarray(biases, dtype=np.float32)
+
     def step(self, action_n: List) -> Tuple[List, List, List, List, List, List, List]:
         if self.update_graph is not None:
             self.update_graph(self.world)

@@ -86,8 +86,11 @@ class Categorical(nn.Module):
 
         self.linear = init_(nn.Linear(num_inputs, num_outputs))
 
-    def forward(self, x: torch.tensor, available_actions=None):
+    def forward(self, x: torch.Tensor, available_actions=None, logits_bias=None):
         x = self.linear(x)
+        if logits_bias is not None:
+            logits_bias = logits_bias.to(dtype=x.dtype, device=x.device)
+            x = x + logits_bias
         # supress the logits at all non-available actions
         if available_actions is not None:
             x[available_actions == 0] = torch.finfo(x.dtype).min

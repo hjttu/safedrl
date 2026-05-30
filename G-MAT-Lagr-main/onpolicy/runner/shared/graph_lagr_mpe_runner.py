@@ -71,6 +71,7 @@ class GSMPERunner(Runner):
                     actions_env,
                     cost_preds,
                     rnn_states_cost,
+                    logits_bias,
                 ) = self.collect(step)
 
                 # print("rnn_states:", rnn_states)
@@ -93,7 +94,8 @@ class GSMPERunner(Runner):
                     rnn_states,
                     rnn_states_critic,
                     cost_preds,
-                    rnn_states_cost
+                    rnn_states_cost,
+                    logits_bias
                 )
 
                 # insert data into buffer
@@ -185,10 +187,19 @@ class GSMPERunner(Runner):
         self.buffer.adj[0] = adj.copy()
         self.buffer.agent_id[0] = agent_id.copy()
         self.buffer.share_agent_id[0] = share_agent_id.copy()
+        self.buffer.logits_bias[0] = np.zeros(
+            (self.n_rollout_threads, self.num_agents, 2, 20), dtype=np.float32
+        )
 
     @torch.no_grad()
     def collect(self, step: int) -> Tuple[arr, arr, arr, arr, arr, arr, arr, arr]:
         self.trainer.prep_rollout()
+        if getattr(self.all_args, "use_soft_action_mask", False):
+            logits_bias = self.envs.get_soft_action_bias()
+        else:
+            logits_bias = np.zeros(
+                (self.n_rollout_threads, self.num_agents, 2, 20), dtype=np.float32
+            )
         (
             value,
             action,
@@ -208,6 +219,7 @@ class GSMPERunner(Runner):
             np.concatenate(self.buffer.rnn_states_critic[step]),
             np.concatenate(self.buffer.masks[step]),
             np.concatenate(self.buffer.rnn_states_cost[step]),
+            logits_bias=np.concatenate(logits_bias),
         )
         # print("cost_preds:", cost_preds)  # DEBUG
         # [self.envs, agents, dim]
@@ -245,6 +257,7 @@ class GSMPERunner(Runner):
             actions_env,
             cost_preds,
             rnn_states_cost,
+            logits_bias,
         )
 
     def insert(self, data):
@@ -264,6 +277,7 @@ class GSMPERunner(Runner):
             rnn_states_critic,
             cost_preds,
             rnn_states_cost,
+            logits_bias,
         ) = data
 
         rnn_states[dones == True] = np.zeros(
@@ -315,6 +329,7 @@ class GSMPERunner(Runner):
             costs=costs,
             cost_preds=cost_preds,
             rnn_states_cost=rnn_states_cost,
+            logits_bias=logits_bias,
         )
 
     @torch.no_grad()

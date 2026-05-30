@@ -272,6 +272,15 @@ def get_config():
     parser.add_argument("--use_pg_fs_shield", type=lambda x: bool(strtobool(x)), default=False)
     parser.add_argument("--shield_type", type=str, default="mask", choices=["mask", "none"])
     parser.add_argument("--shield_dt", type=float, default=0.1)
+    parser.add_argument("--use_soft_action_mask", type=lambda x: bool(strtobool(x)), default=False)
+    parser.add_argument("--soft_mask_scale", type=float, default=1.0)
+    parser.add_argument("--soft_mask_temperature", type=float, default=3.0)
+    parser.add_argument("--soft_risk_threshold", type=float, default=0.05)
+    parser.add_argument("--soft_mask_max_bias", type=float, default=6.0)
+    parser.add_argument("--soft_axis_lme_beta", type=float, default=5.0)
+    parser.add_argument("--soft_safety_risk_coef", type=float, default=1.0)
+    parser.add_argument("--soft_progress_risk_coef", type=float, default=0.2)
+    parser.add_argument("--soft_deadlock_risk_coef", type=float, default=0.1)
 
     # CBF / mask
     parser.add_argument("--cbf_alpha", type=float, default=0.8)
@@ -320,11 +329,14 @@ def get_config():
 
     # feasibility cost coefficients, used in Phase 2
     parser.add_argument("--use_feasibility_cost", type=lambda x: bool(strtobool(x)), default=False)
-    parser.add_argument("--feasibility_cost_coef", type=float, default=0.5)
-    parser.add_argument("--deadlock_cost_coef", type=float, default=1.0)
-    parser.add_argument("--mask_tightness_cost_coef", type=float, default=0.2)
-    parser.add_argument("--intervention_cost_coef", type=float, default=0.05)
-    parser.add_argument("--fallback_cost_coef", type=float, default=0.5)
+    parser.add_argument("--feasibility_cost_coef", type=float, default=0.15)
+    parser.add_argument("--deadlock_cost_coef", type=float, default=0.20)
+    parser.add_argument("--mask_tightness_cost_coef", type=float, default=0.03)
+    parser.add_argument("--intervention_cost_coef", type=float, default=0.005)
+    parser.add_argument("--fallback_cost_coef", type=float, default=0.05)
+    parser.add_argument("--feasibility_cost_clip", type=float, default=0.5)
+    parser.add_argument("--soft_bias_cost_coef", type=float, default=0.02)
+    parser.add_argument("--soft_danger_ratio_cost_coef", type=float, default=0.05)
 
     # run parameters
     parser.add_argument("--use_linear_lr_decay", action="store_true", default=False, help="use a linear schedule on the learning rate")

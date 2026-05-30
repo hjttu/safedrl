@@ -214,6 +214,9 @@ class Scenario(BaseScenario):
             "Shield_intervention_rate": getattr(agent, "shield_intervention_count", 0) / max(getattr(agent, "shield_total_count", 1), 1),
             "Mask_tightness_avg": getattr(agent, "mask_tightness_sum", 0.0) / max(getattr(agent, "shield_total_count", 1), 1),
             "Fallback_count": getattr(agent, "fallback_count", 0),
+            "Soft_bias_mean": getattr(agent, "soft_bias_mean", 0.0),
+            "Soft_bias_max": getattr(agent, "soft_bias_max", 0.0),
+            "Soft_danger_ratio": getattr(agent, "soft_danger_ratio", 0.0),
         }
 
         return agent_info
@@ -233,6 +236,9 @@ class Scenario(BaseScenario):
         agent.fallback_count = 0
         agent.safety_cost = 0.0
         agent.feasibility_cost = 0.0
+        agent.soft_bias_mean = 0.0
+        agent.soft_bias_max = 0.0
+        agent.soft_danger_ratio = 0.0
 
     def _cost_with_feasibility(self, agent: Agent, world: World, collision_cost: float) -> float:
         agent.safety_cost = collision_cost
@@ -241,20 +247,25 @@ class Scenario(BaseScenario):
             agent.feasibility_cost = 0.0
             return collision_cost
 
-        shield_info = getattr(agent, "shield_info", {})
+        shield_info = getattr(agent, "shield_info", {}) or {}
         deadlock_score = float(shield_info.get("deadlock_score", getattr(agent, "deadlock_score", 0.0)))
         mask_tightness = float(shield_info.get("mask_tightness", 0.0))
         intervened = 1.0 if shield_info.get("intervened", False) else 0.0
         fallback = 1.0 if shield_info.get("fallback", False) else 0.0
+        soft_bias_mean = float(shield_info.get("soft_bias_mean", getattr(agent, "soft_bias_mean", 0.0)))
+        soft_danger_ratio = float(shield_info.get("soft_danger_ratio", getattr(agent, "soft_danger_ratio", 0.0)))
 
         feasibility_cost = 0.0
         if deadlock_score > getattr(world_args, "deadlock_threshold", 0.6):
-            feasibility_cost += getattr(world_args, "deadlock_cost_coef", 1.0) * deadlock_score
-        feasibility_cost += getattr(world_args, "mask_tightness_cost_coef", 0.2) * mask_tightness
-        feasibility_cost += getattr(world_args, "intervention_cost_coef", 0.05) * intervened
-        feasibility_cost += getattr(world_args, "fallback_cost_coef", 0.5) * fallback
+            feasibility_cost += getattr(world_args, "deadlock_cost_coef", 0.20) * deadlock_score
+        feasibility_cost += getattr(world_args, "mask_tightness_cost_coef", 0.03) * mask_tightness
+        feasibility_cost += getattr(world_args, "intervention_cost_coef", 0.005) * intervened
+        feasibility_cost += getattr(world_args, "fallback_cost_coef", 0.05) * fallback
+        feasibility_cost += getattr(world_args, "soft_bias_cost_coef", 0.02) * soft_bias_mean
+        feasibility_cost += getattr(world_args, "soft_danger_ratio_cost_coef", 0.05) * soft_danger_ratio
+        feasibility_cost = min(feasibility_cost, getattr(world_args, "feasibility_cost_clip", 0.5))
         agent.feasibility_cost = feasibility_cost
-        return collision_cost + getattr(world_args, "feasibility_cost_coef", 0.5) * feasibility_cost
+        return collision_cost + getattr(world_args, "feasibility_cost_coef", 0.15) * feasibility_cost
 
 
     # check collision of entity with obstacles

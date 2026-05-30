@@ -217,11 +217,12 @@ class GS_MAPPO():
         share_agent_id_batch, rnn_states_batch, rnn_states_critic_batch, \
         actions_batch, value_preds_batch, return_batch, masks_batch, \
         active_masks_batch, old_action_log_probs_batch, adv_targ, \
-        available_actions_batch, factor_batch, cost_preds_batch, \
+        logits_bias_batch, available_actions_batch, factor_batch, cost_preds_batch, \
         cost_returns_batch, rnn_states_cost_batch, cost_adv_targ, \
         aver_episode_costs = sample
 
         old_action_log_probs_batch = check(old_action_log_probs_batch).to(**self.tpdv)
+        logits_bias_batch = check(logits_bias_batch).to(**self.tpdv)
         adv_targ = check(adv_targ).to(**self.tpdv)
         value_preds_batch = check(value_preds_batch).to(**self.tpdv)
         return_batch = check(return_batch).to(**self.tpdv)
@@ -246,7 +247,8 @@ class GS_MAPPO():
             masks_batch, 
             available_actions_batch,
             active_masks_batch,
-            rnn_states_cost_batch
+            rnn_states_cost_batch,
+            logits_bias=logits_bias_batch,
         )
 
         # Actor update with Lagrangian hybrid advantage

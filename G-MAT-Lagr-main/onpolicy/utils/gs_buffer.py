@@ -185,6 +185,10 @@ class GSReplayBuffer(object):
             (self.episode_length, self.n_rollout_threads, num_agents, act_shape),
             dtype=np.float32,
         )
+        self.logits_bias = np.zeros(
+            (self.episode_length + 1, self.n_rollout_threads, num_agents, 2, 20),
+            dtype=np.float32,
+        )
         self.rewards = np.zeros(
             (self.episode_length, self.n_rollout_threads, num_agents, 1),
             dtype=np.float32,
@@ -238,6 +242,7 @@ class GSReplayBuffer(object):
         costs: np.ndarray = None,
         cost_preds: np.ndarray = None,
         rnn_states_cost: np.ndarray = None,
+        logits_bias: np.ndarray = None,
     ) -> None:
         """
         Insert data into the replay buffer, including safety-related data.
@@ -252,6 +257,10 @@ class GSReplayBuffer(object):
         self.rnn_states_critic[self.step + 1] = rnn_states_critic.copy()
         self.actions[self.step] = actions.copy()
         self.action_log_probs[self.step] = action_log_probs.copy()
+        if logits_bias is not None:
+            self.logits_bias[self.step] = logits_bias.copy()
+        else:
+            self.logits_bias[self.step] = 0.0
         self.value_preds[self.step] = value_preds.copy()
         self.rewards[self.step] = rewards.copy()
         self.masks[self.step + 1] = masks.copy()
@@ -281,6 +290,7 @@ class GSReplayBuffer(object):
         self.rnn_states[0] = self.rnn_states[-1].copy()
         self.rnn_states_critic[0] = self.rnn_states_critic[-1].copy()
         self.rnn_states_cost[0] = self.rnn_states_cost[-1].copy()
+        self.logits_bias[0] = self.logits_bias[-1].copy()
         self.masks[0] = self.masks[-1].copy()
         self.bad_masks[0] = self.bad_masks[-1].copy()
         self.active_masks[0] = self.active_masks[-1].copy()
@@ -592,6 +602,7 @@ class GSReplayBuffer(object):
             -1, *self.rnn_states_cost.shape[3:]
         )
         actions = self.actions.reshape(-1, self.actions.shape[-1])
+        logits_bias = self.logits_bias[:-1].reshape(-1, *self.logits_bias.shape[3:])
         if self.available_actions is not None:
             available_actions = self.available_actions[:-1].reshape(
                 -1, self.available_actions.shape[-1]
@@ -624,6 +635,7 @@ class GSReplayBuffer(object):
             rnn_states_critic_batch = rnn_states_critic[indices]
             rnn_states_cost_batch = rnn_states_cost[indices]
             actions_batch = actions[indices]
+            logits_bias_batch = logits_bias[indices]
             if self.available_actions is not None:
                 available_actions_batch = available_actions[indices]
             else:
@@ -663,6 +675,7 @@ class GSReplayBuffer(object):
                 masks_batch,
                 active_masks_batch,
                 old_action_log_probs_batch,
+                logits_bias_batch,
                 adv_targ,
                 available_actions_batch,
                 factor_batch,
@@ -739,6 +752,7 @@ class GSReplayBuffer(object):
             -1, batch_size, *self.rnn_states_cost.shape[3:]
         )
         actions = self.actions.reshape(-1, batch_size, self.actions.shape[-1])
+        logits_bias = self.logits_bias.reshape(-1, batch_size, *self.logits_bias.shape[3:])
         if self.available_actions is not None:
             available_actions = self.available_actions.reshape(
                 -1, batch_size, self.available_actions.shape[-1]
@@ -779,6 +793,7 @@ class GSReplayBuffer(object):
             masks_batch = []
             active_masks_batch = []
             old_action_log_probs_batch = []
+            logits_bias_batch = []
             adv_targ = []
             cost_adv_targ = []
             factor_batch = []
@@ -805,6 +820,7 @@ class GSReplayBuffer(object):
                 masks_batch.append(masks[:-1, ind])
                 active_masks_batch.append(active_masks[:-1, ind])
                 old_action_log_probs_batch.append(action_log_probs[:, ind])
+                logits_bias_batch.append(logits_bias[:-1, ind])
                 adv_targ.append(advantages[:, ind])
                 if cost_adv is not None:
                     cost_adv_targ.append(cost_adv[:, ind])
@@ -829,6 +845,7 @@ class GSReplayBuffer(object):
             masks_batch = np.stack(masks_batch, 1)
             active_masks_batch = np.stack(active_masks_batch, 1)
             old_action_log_probs_batch = np.stack(old_action_log_probs_batch, 1)
+            logits_bias_batch = np.stack(logits_bias_batch, 1)
             adv_targ = np.stack(adv_targ, 1)
             if cost_adv is not None:
                 cost_adv_targ = np.stack(cost_adv_targ, 1)
@@ -864,6 +881,7 @@ class GSReplayBuffer(object):
             masks_batch = _flatten(T, N, masks_batch)
             active_masks_batch = _flatten(T, N, active_masks_batch)
             old_action_log_probs_batch = _flatten(T, N, old_action_log_probs_batch)
+            logits_bias_batch = _flatten(T, N, logits_bias_batch)
             adv_targ = _flatten(T, N, adv_targ)
             if cost_adv is not None:
                 cost_adv_targ = _flatten(T, N, cost_adv_targ)
@@ -890,6 +908,7 @@ class GSReplayBuffer(object):
                 masks_batch,
                 active_masks_batch,
                 old_action_log_probs_batch,
+                logits_bias_batch,
                 adv_targ,
                 available_actions_batch,
                 factor_batch,
@@ -974,6 +993,7 @@ class GSReplayBuffer(object):
         agent_id = _cast(self.agent_id[:-1])
         share_agent_id = _cast(self.share_agent_id[:-1])
         actions = _cast(self.actions)
+        logits_bias = _cast(self.logits_bias[:-1])
         action_log_probs = _cast(self.action_log_probs)
         advantages = _cast(advantages)
         value_preds = _cast(self.value_preds[:-1])
@@ -1024,6 +1044,7 @@ class GSReplayBuffer(object):
             masks_batch = []
             active_masks_batch = []
             old_action_log_probs_batch = []
+            logits_bias_batch = []
             adv_targ = []
             cost_adv_targ = []
             factor_batch = []
@@ -1047,6 +1068,7 @@ class GSReplayBuffer(object):
                 masks_batch.append(masks[ind : ind + data_chunk_length])
                 active_masks_batch.append(active_masks[ind : ind + data_chunk_length])
                 old_action_log_probs_batch.append(action_log_probs[ind : ind + data_chunk_length])
+                logits_bias_batch.append(logits_bias[ind : ind + data_chunk_length])
                 adv_targ.append(advantages[ind : ind + data_chunk_length])
                 if cost_adv is not None:
                     cost_adv_targ.append(cost_adv[ind : ind + data_chunk_length])
@@ -1074,6 +1096,7 @@ class GSReplayBuffer(object):
             masks_batch = np.stack(masks_batch, axis=1)
             active_masks_batch = np.stack(active_masks_batch, axis=1)
             old_action_log_probs_batch = np.stack(old_action_log_probs_batch, axis=1)
+            logits_bias_batch = np.stack(logits_bias_batch, axis=1)
             adv_targ = np.stack(adv_targ, axis=1)
             if cost_adv is not None:
                 cost_adv_targ = np.stack(cost_adv_targ, axis=1)
@@ -1107,6 +1130,7 @@ class GSReplayBuffer(object):
             masks_batch = _flatten(L, N, masks_batch)
             active_masks_batch = _flatten(L, N, active_masks_batch)
             old_action_log_probs_batch = _flatten(L, N, old_action_log_probs_batch)
+            logits_bias_batch = _flatten(L, N, logits_bias_batch)
             adv_targ = _flatten(L, N, adv_targ)
             if cost_adv_targ is not None:
                 cost_adv_targ = _flatten(L, N, cost_adv_targ)
@@ -1129,6 +1153,7 @@ class GSReplayBuffer(object):
                 masks_batch,
                 active_masks_batch,
                 old_action_log_probs_batch,
+                logits_bias_batch,
                 adv_targ,
                 available_actions_batch,
                 factor_batch,

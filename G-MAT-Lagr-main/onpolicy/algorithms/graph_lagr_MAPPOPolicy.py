@@ -144,6 +144,7 @@ class GS_MAPPOPolicy:
         rnn_states_cost,
         available_actions=None,
         deterministic=False,
+        logits_bias=None,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """
         Compute actions and value function predictions for the given inputs.
@@ -196,6 +197,7 @@ class GS_MAPPOPolicy:
             masks,
             available_actions,
             deterministic,
+            logits_bias=logits_bias,
         )
 
         values, rnn_states_critic = self.critic.forward(
@@ -273,6 +275,7 @@ class GS_MAPPOPolicy:
         available_actions=None,
         active_masks=None,
         rnn_states_cost=None,
+        logits_bias=None,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         Get action logprobs / entropy and
@@ -320,6 +323,7 @@ class GS_MAPPOPolicy:
             masks,
             available_actions,
             active_masks,
+            logits_bias=logits_bias,
         )
 
         values, _ = self.critic.forward(
@@ -341,6 +345,7 @@ class GS_MAPPOPolicy:
         masks,
         available_actions=None,
         deterministic=False,
+        logits_bias=None,
     ) -> Tuple[Tensor, Tensor]:
         """
         Compute actions using the given inputs.
@@ -372,5 +377,6 @@ class GS_MAPPOPolicy:
             masks,
             available_actions,
             deterministic,
+            logits_bias=logits_bias,
         )
         return actions, rnn_states_actor

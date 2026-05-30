@@ -1040,6 +1040,8 @@ def graphworker(remote, parent_remote, env_fn_wrapper):
                 env.render(mode=data)
         elif cmd == 'set_cl':
             env._set_CL(data)
+        elif cmd == "get_soft_action_bias":
+            remote.send(env.get_soft_action_bias())
         elif cmd == "reset_task":
             ob, ag_id, node_ob, adj = env.reset_task()
             remote.send((ob, ag_id, node_ob, adj))
@@ -1123,6 +1125,9 @@ class GraphDummyVecEnv(ShareVecEnv):
     def set_CL(self, CL_ratio):
         for env in self.envs:
             env._set_CL(CL_ratio)
+
+    def get_soft_action_bias(self):
+        return np.asarray([env.get_soft_action_bias() for env in self.envs], dtype=np.float32)
 
 
 class GraphSubprocVecEnv(ShareVecEnv):
@@ -1230,3 +1235,8 @@ class GraphSubprocVecEnv(ShareVecEnv):
     def set_CL(self, CL_ratio):
         for remote in self.remotes:
             remote.send(('set_cl', CL_ratio))
+
+    def get_soft_action_bias(self):
+        for remote in self.remotes:
+            remote.send(("get_soft_action_bias", None))
+        return np.stack([remote.recv() for remote in self.remotes])

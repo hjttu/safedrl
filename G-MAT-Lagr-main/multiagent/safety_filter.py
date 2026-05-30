@@ -325,6 +325,98 @@ def fallback_action(agent, world, a_escape, args):
     return limit_action_inf_norm(action, 1.0)
 
 
+def compute_soft_action_bias(agent, world, args):
+    """
+    Return logits_bias with shape (2, 20) for MultiDiscrete [ax, ay].
+    Negative values reduce logits. Zero means no change.
+    """
+    action_mapping = np.linspace(-1.0, 1.0, 20, dtype=np.float32)
+    neighbors = get_neighbors(agent, world)
+    risk = risk_score(agent, world, neighbors)
+    update_priority(agent, world, risk, args)
+
+    dt = float(getattr(world, "dt", _arg(args, "shield_dt", 0.1)))
+    alpha = float(_arg(args, "cbf_alpha", 1.0))
+    progress_tolerance = float(_arg(args, "progress_tolerance", 0.0))
+    safety_coef = float(_arg(args, "soft_safety_risk_coef", 1.0))
+    progress_coef = float(_arg(args, "soft_progress_risk_coef", 0.2))
+    deadlock_coef = float(_arg(args, "soft_deadlock_risk_coef", 0.1))
+    current_deadlock_score = float(getattr(agent, "deadlock_score", 0.0))
+
+    p_i = _entity_pos(agent)
+    v_i = _speed(agent)
+    joint_risk = np.zeros((20, 20), dtype=np.float32)
+
+    for k, ax in enumerate(action_mapping):
+        for l, ay in enumerate(action_mapping):
+            action = np.array([ax, ay], dtype=np.float32)
+            safety_violation = 0.0
+            p_i_next = p_i + v_i * dt + 0.5 * action * dt * dt
+
+            for other in neighbors:
+                p_j = _entity_pos(other)
+                v_j = _speed(other)
+                base_margin = float(_arg(args, "cbf_safe_margin", 0.0))
+                yield_margin = float(_arg(args, "cbf_yield_margin", 0.1))
+                pass_margin = float(_arg(args, "cbf_pass_margin", 0.0))
+                asym_margin = float(_arg(args, "asymmetric_yield_margin", 0.0))
+
+                safe_r = _radius(agent) + _radius(other) + base_margin + asym_margin
+                other_priority = getattr(other, "priority", None)
+                agent_priority = getattr(agent, "priority", None)
+                if other_priority is not None and agent_priority is not None and agent_priority < other_priority:
+                    safe_r += yield_margin
+                else:
+                    safe_r += pass_margin
+
+                p_j_next = p_j + v_j * dt
+                h_now = float(np.dot(p_i - p_j, p_i - p_j) - safe_r * safe_r)
+                h_next = float(np.dot(p_i_next - p_j_next, p_i_next - p_j_next) - safe_r * safe_r)
+                cbf_value = h_next - (1.0 - alpha * dt) * h_now
+                violation = max(0.0, -cbf_value)
+                scale = max(safe_r * safe_r, EPS)
+                safety_violation += violation / scale
+
+            progress = predict_progress(agent, world, action)
+            progress_risk = max(0.0, -progress - progress_tolerance)
+            joint_risk[k, l] = (
+                safety_coef * safety_violation
+                + progress_coef * progress_risk
+                + deadlock_coef * current_deadlock_score
+            )
+
+    beta = float(_arg(args, "soft_axis_lme_beta", 5.0))
+    beta = beta if abs(beta) > EPS else 1.0
+    max_x = np.max(beta * joint_risk, axis=1, keepdims=True)
+    risk_x = (np.log(np.mean(np.exp(beta * joint_risk - max_x), axis=1)) + max_x[:, 0]) / beta
+    max_y = np.max(beta * joint_risk, axis=0, keepdims=True)
+    risk_y = (np.log(np.mean(np.exp(beta * joint_risk - max_y), axis=0)) + max_y[0, :]) / beta
+
+    threshold = float(_arg(args, "soft_risk_threshold", 0.05))
+    scale = float(_arg(args, "soft_mask_scale", 1.0))
+    temperature = float(_arg(args, "soft_mask_temperature", 3.0))
+    max_bias = abs(float(_arg(args, "soft_mask_max_bias", 6.0)))
+
+    def risk_to_bias(axis_risk):
+        excess = np.maximum(axis_risk - threshold, 0.0)
+        bias = -scale * np.expm1(temperature * excess)
+        return np.clip(bias, -max_bias, 0.0)
+
+    logits_bias = np.stack([risk_to_bias(risk_x), risk_to_bias(risk_y)], axis=0)
+    logits_bias = np.nan_to_num(logits_bias, nan=0.0, posinf=0.0, neginf=-max_bias).astype(np.float32)
+
+    agent.soft_bias_mean = float(np.mean(np.abs(logits_bias)))
+    agent.soft_bias_max = float(np.max(np.abs(logits_bias)))
+    agent.soft_danger_ratio = float(np.mean(logits_bias < -1e-6))
+    if not hasattr(agent, "shield_info") or agent.shield_info is None:
+        agent.shield_info = {}
+    agent.shield_info["soft_bias_mean"] = agent.soft_bias_mean
+    agent.shield_info["soft_bias_max"] = agent.soft_bias_max
+    agent.shield_info["soft_danger_ratio"] = agent.soft_danger_ratio
+
+    return logits_bias
+
+
 def pg_fs_shield(agent, world, a_rl, a_guide, args):
     world._pgfs_args = args
     agent._pgfs_world = world

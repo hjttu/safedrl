@@ -62,6 +62,7 @@ class ACTLayer(nn.Module):
         x: torch.tensor,
         available_actions: Optional[torch.tensor] = None,
         deterministic: bool = False,
+        logits_bias: Optional[torch.tensor] = None,
     ):
         """
         Compute actions and action logprobs from given input.
@@ -96,8 +97,9 @@ class ACTLayer(nn.Module):
         elif self.multi_discrete:
             actions = []
             action_log_probs = []
-            for action_out in self.action_outs:
-                action_logit = action_out(x)
+            for idx, action_out in enumerate(self.action_outs):
+                action_logits_bias = None if logits_bias is None else logits_bias[:, idx, :]
+                action_logit = action_out(x, logits_bias=action_logits_bias)
                 action = action_logit.mode() if deterministic else action_logit.sample()
                 action_log_prob = action_logit.log_probs(action)
                 actions.append(action)
@@ -107,14 +109,20 @@ class ACTLayer(nn.Module):
             action_log_probs = torch.cat(action_log_probs, -1)
 
         else:
-            action_logits = self.action_out(x, available_actions)
+            if logits_bias is None:
+                action_logits = self.action_out(x, available_actions)
+            else:
+                action_logits = self.action_out(x, available_actions, logits_bias=logits_bias)
             actions = action_logits.mode() if deterministic else action_logits.sample()
             action_log_probs = action_logits.log_probs(actions)
 
         return actions, action_log_probs
 
     def get_probs(
-        self, x: torch.Tensor, available_actions: Optional[torch.tensor] = None
+        self,
+        x: torch.Tensor,
+        available_actions: Optional[torch.tensor] = None,
+        logits_bias: Optional[torch.tensor] = None,
     ):
         """
         Compute action probabilities from inputs.
@@ -126,15 +134,26 @@ class ACTLayer(nn.Module):
 
         :return action_probs: torch.Tensor
         """
-        if self.mixed_action or self.multi_discrete:
+        if self.mixed_action:
             action_probs = []
             for action_out in self.action_outs:
                 action_logit = action_out(x)
                 action_prob = action_logit.probs
                 action_probs.append(action_prob)
             action_probs = torch.cat(action_probs, -1)
+        elif self.multi_discrete:
+            action_probs = []
+            for idx, action_out in enumerate(self.action_outs):
+                action_logits_bias = None if logits_bias is None else logits_bias[:, idx, :]
+                action_logit = action_out(x, logits_bias=action_logits_bias)
+                action_prob = action_logit.probs
+                action_probs.append(action_prob)
+            action_probs = torch.cat(action_probs, -1)
         else:
-            action_logits = self.action_out(x, available_actions)
+            if logits_bias is None:
+                action_logits = self.action_out(x, available_actions)
+            else:
+                action_logits = self.action_out(x, available_actions, logits_bias=logits_bias)
             action_probs = action_logits.probs
 
         return action_probs
@@ -145,6 +164,7 @@ class ACTLayer(nn.Module):
         action: torch.tensor,
         available_actions: Optional[torch.tensor] = None,
         active_masks: Optional[torch.tensor] = None,
+        logits_bias: Optional[torch.tensor] = None,
     ):
         """
         Compute log probability and entropy of given actions.
@@ -197,8 +217,9 @@ class ACTLayer(nn.Module):
             action = torch.transpose(action, 0, 1)
             action_log_probs = []
             dist_entropy = []
-            for action_out, act in zip(self.action_outs, action):
-                action_logit = action_out(x)
+            for idx, (action_out, act) in enumerate(zip(self.action_outs, action)):
+                action_logits_bias = None if logits_bias is None else logits_bias[:, idx, :]
+                action_logit = action_out(x, logits_bias=action_logits_bias)
                 action_log_probs.append(action_logit.log_probs(act))
                 if active_masks is not None:
                     dist_entropy.append(
@@ -212,7 +233,10 @@ class ACTLayer(nn.Module):
             dist_entropy = torch.tensor(dist_entropy).mean()
 
         else:
-            action_logits = self.action_out(x, available_actions)
+            if logits_bias is None:
+                action_logits = self.action_out(x, available_actions)
+            else:
+                action_logits = self.action_out(x, available_actions, logits_bias=logits_bias)
             action_log_probs = action_logits.log_probs(action)
             if active_masks is not None:
                 dist_entropy = (

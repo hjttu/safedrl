@@ -123,6 +123,7 @@ class GR_Actor(nn.Module):
         masks,
         available_actions=None,
         deterministic=False,
+        logits_bias=None,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Compute actions from the given inputs.
@@ -160,6 +161,8 @@ class GR_Actor(nn.Module):
         masks = check(masks).to(**self.tpdv)
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
+        if logits_bias is not None:
+            logits_bias = check(logits_bias).to(**self.tpdv)
 
         # if batch size is big, split into smaller batches, forward pass and then concatenate
         if (self.split_batch) and (obs.shape[0] > self.max_batch_size):
@@ -185,7 +188,10 @@ class GR_Actor(nn.Module):
             actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
 
         actions, action_log_probs = self.act(
-            actor_features, available_actions, deterministic
+            actor_features,
+            available_actions,
+            deterministic,
+            logits_bias=logits_bias,
         )
 
         return (actions, action_log_probs, rnn_states)
@@ -201,6 +207,7 @@ class GR_Actor(nn.Module):
         masks,
         available_actions=None,
         active_masks=None,
+        logits_bias=None,
     ) -> Tuple[Tensor, Tensor]:
         """
         Compute log probability and entropy of given actions.
@@ -239,6 +246,8 @@ class GR_Actor(nn.Module):
         masks = check(masks).to(**self.tpdv)
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
+        if logits_bias is not None:
+            logits_bias = check(logits_bias).to(**self.tpdv)
 
         if active_masks is not None:
             active_masks = check(active_masks).to(**self.tpdv)
@@ -269,6 +278,7 @@ class GR_Actor(nn.Module):
             action,
             available_actions,
             active_masks=active_masks if self._use_policy_active_masks else None,
+            logits_bias=logits_bias,
         )
 
         return (action_log_probs, dist_entropy)
