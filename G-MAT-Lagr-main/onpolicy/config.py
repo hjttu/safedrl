@@ -268,6 +268,64 @@ def get_config():
     parser.add_argument("--cp", type=float, default=0.6, help='cp used in simple scenarios')
     parser.add_argument("--js_ratio", type=float, default=0.8, help='the threshold of the curriculum')
 
+    # PG-FSShield
+    parser.add_argument("--use_pg_fs_shield", type=lambda x: bool(strtobool(x)), default=False)
+    parser.add_argument("--shield_type", type=str, default="mask", choices=["mask", "none"])
+    parser.add_argument("--shield_dt", type=float, default=0.1)
+
+    # CBF / mask
+    parser.add_argument("--cbf_alpha", type=float, default=0.8)
+    parser.add_argument("--cbf_safe_margin", type=float, default=0.03)
+    parser.add_argument("--cbf_yield_margin", type=float, default=0.08)
+    parser.add_argument("--cbf_pass_margin", type=float, default=0.02)
+    parser.add_argument("--intervention_eps", type=float, default=0.05)
+
+    # risk and adaptive guide ratio
+    parser.add_argument("--shield_risk_margin", type=float, default=0.2)
+    parser.add_argument("--risk_decay", type=float, default=3.0)
+    parser.add_argument("--risk_threshold", type=float, default=0.6)
+    parser.add_argument("--risk_gain", type=float, default=5.0)
+    parser.add_argument("--rho_base", type=float, default=0.0)
+    parser.add_argument("--rho_risk_coef", type=float, default=0.35)
+    parser.add_argument("--rho_deadlock_coef", type=float, default=0.45)
+    parser.add_argument("--rho_curriculum_coef", type=float, default=0.2)
+
+    # action reference weights
+    parser.add_argument("--guide_weight", type=float, default=0.7)
+    parser.add_argument("--progress_ref_weight", type=float, default=0.3)
+    parser.add_argument("--escape_ref_ratio", type=float, default=0.7)
+
+    # mask scoring
+    parser.add_argument("--action_track_weight", type=float, default=1.0)
+    parser.add_argument("--escape_weight", type=float, default=1.0)
+    parser.add_argument("--progress_score_weight", type=float, default=0.5)
+    parser.add_argument("--progress_tolerance", type=float, default=0.02)
+
+    # fallback
+    parser.add_argument("--fallback_escape_coef", type=float, default=0.7)
+    parser.add_argument("--fallback_damping_coef", type=float, default=0.3)
+
+    # deadlock detection
+    parser.add_argument("--deadlock_window", type=int, default=10)
+    parser.add_argument("--deadlock_threshold", type=float, default=0.6)
+    parser.add_argument("--deadlock_gain", type=float, default=6.0)
+    parser.add_argument("--stuck_progress_eps", type=float, default=0.005)
+    parser.add_argument("--stuck_speed_eps", type=float, default=0.03)
+
+    # asymmetric priority
+    parser.add_argument("--priority_wait_coef", type=float, default=0.05)
+    parser.add_argument("--priority_dist_coef", type=float, default=0.1)
+    parser.add_argument("--priority_deadlock_coef", type=float, default=0.3)
+    parser.add_argument("--priority_risk_coef", type=float, default=0.2)
+
+    # feasibility cost coefficients, used in Phase 2
+    parser.add_argument("--use_feasibility_cost", type=lambda x: bool(strtobool(x)), default=False)
+    parser.add_argument("--feasibility_cost_coef", type=float, default=0.5)
+    parser.add_argument("--deadlock_cost_coef", type=float, default=1.0)
+    parser.add_argument("--mask_tightness_cost_coef", type=float, default=0.2)
+    parser.add_argument("--intervention_cost_coef", type=float, default=0.05)
+    parser.add_argument("--fallback_cost_coef", type=float, default=0.5)
+
     # run parameters
     parser.add_argument("--use_linear_lr_decay", action="store_true", default=False, help="use a linear schedule on the learning rate")
     parser.add_argument("--use_train_render", type=lambda x: bool(strtobool(x)), default=False, help='render environment while training')

@@ -130,6 +130,7 @@ class Scenario(BaseScenario):
             tx, ty = scenario['targets'][i]
             world.egos[i].goal = np.array([tx, ty])
             world.egos[i].goal_color = world.targets[i].color
+            self._reset_shield_state(world.egos[i])
 
         # Assign targets
         for i, (x, y) in enumerate(scenario['targets']):
@@ -198,9 +199,54 @@ class Scenario(BaseScenario):
             "Time_req_to_goal": world.times_required[agent.id],
             "Num_agent_collisions": world.num_agent_collisions[agent.id],
             "Num_obst_collisions": world.num_obstacle_collisions[agent.id],
+            "Safety_cost": getattr(agent, "safety_cost", 0.0),
+            "Feasibility_cost": getattr(agent, "feasibility_cost", 0.0),
+            "Deadlock_score": getattr(agent, "deadlock_score", 0.0),
+            "Deadlock_duration": getattr(agent, "deadlock_duration", 0),
+            "Shield_intervention_rate": getattr(agent, "shield_intervention_count", 0) / max(getattr(agent, "shield_total_count", 1), 1),
+            "Mask_tightness_avg": getattr(agent, "mask_tightness_sum", 0.0) / max(getattr(agent, "shield_total_count", 1), 1),
+            "Fallback_count": getattr(agent, "fallback_count", 0),
         }
 
         return agent_info
+
+    def _reset_shield_state(self, agent: Agent) -> None:
+        agent.shield_info = {}
+        agent.last_goal_dist = None
+        agent.stuck_count = 0
+        agent.waiting_time = 0
+        agent.cbf_active_count = 0
+        agent.deadlock_score = 0.0
+        agent.deadlock_duration = 0
+        agent.priority = 0.0
+        agent.shield_total_count = 0
+        agent.shield_intervention_count = 0
+        agent.mask_tightness_sum = 0.0
+        agent.fallback_count = 0
+        agent.safety_cost = 0.0
+        agent.feasibility_cost = 0.0
+
+    def _cost_with_feasibility(self, agent: Agent, world: World, collision_cost: float) -> float:
+        agent.safety_cost = collision_cost
+        world_args = getattr(world, "args", None)
+        if not getattr(world_args, "use_feasibility_cost", False):
+            agent.feasibility_cost = 0.0
+            return collision_cost
+
+        shield_info = getattr(agent, "shield_info", {})
+        deadlock_score = float(shield_info.get("deadlock_score", getattr(agent, "deadlock_score", 0.0)))
+        mask_tightness = float(shield_info.get("mask_tightness", 0.0))
+        intervened = 1.0 if shield_info.get("intervened", False) else 0.0
+        fallback = 1.0 if shield_info.get("fallback", False) else 0.0
+
+        feasibility_cost = 0.0
+        if deadlock_score > getattr(world_args, "deadlock_threshold", 0.6):
+            feasibility_cost += getattr(world_args, "deadlock_cost_coef", 1.0) * deadlock_score
+        feasibility_cost += getattr(world_args, "mask_tightness_cost_coef", 0.2) * mask_tightness
+        feasibility_cost += getattr(world_args, "intervention_cost_coef", 0.05) * intervened
+        feasibility_cost += getattr(world_args, "fallback_cost_coef", 0.5) * fallback
+        agent.feasibility_cost = feasibility_cost
+        return collision_cost + getattr(world_args, "feasibility_cost_coef", 0.5) * feasibility_cost
 
 
     # check collision of entity with obstacles
@@ -278,7 +324,8 @@ class Scenario(BaseScenario):
         # if abs(agent.state.p_pos[0]) > self.world_size/2 or abs(agent.state.p_pos[1]) > self.world_size/2:
         #     cost += 1.0
 
-        return cost
+        collision_cost = cost
+        return self._cost_with_feasibility(agent, world, collision_cost)
 
     def reward(self, agent: Agent, world: World) -> float:
         if self.use_CL:

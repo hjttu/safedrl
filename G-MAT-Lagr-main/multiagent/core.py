@@ -136,6 +136,20 @@ class Agent(Entity):
         self.policy_action = np.array([0,0])
         self.network_action = np.array([0,0])
         self.delta = 0.1
+        self.shield_info = {}
+        self.last_goal_dist = None
+        self.stuck_count = 0
+        self.waiting_time = 0
+        self.cbf_active_count = 0
+        self.deadlock_score = 0.0
+        self.deadlock_duration = 0
+        self.priority = 0.0
+        self.shield_total_count = 0
+        self.shield_intervention_count = 0
+        self.mask_tightness_sum = 0.0
+        self.fallback_count = 0
+        self.safety_cost = 0.0
+        self.feasibility_cost = 0.0
 
 class Target(Agent):
     def __init__(self):

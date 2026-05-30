@@ -9,6 +9,7 @@ from multiagent.core import World, Agent
 from multiagent.multi_discrete import MultiDiscrete
 from onpolicy import global_var as glv
 from .guide_policy import guide_policy, set_JS_curriculum, limit_action_inf_norm
+from .safety_filter import pg_fs_shield
 import csv
 
 # update bounds to center around agent
@@ -74,6 +75,8 @@ class MultiAgentBaseEnv(gym.Env):
             self.angle_error = 0
 
         self.world = world
+        self.world.args = args
+        self.world.CL_ratio = self.CL_ratio
         self.world_length = self.world.world_length
         self.current_step = 0
         self.agents = self.world.policy_agents
@@ -275,25 +278,42 @@ class MultiAgentBaseEnv(gym.Env):
                 # agent.state.p_vel = np.array([0,0])
                 # print("agent done, decellerate to zero")
 
-            if self.use_CL == True:
-                if self.CL_ratio < self.Cp:
-                    if self.current_step < self.JS_thre:
-                        agent.action.u = policy_output
+            a_rl = limit_action_inf_norm(network_output, 1)
+            a_guide = limit_action_inf_norm(policy_output, 1)
+
+            if getattr(self.args, "use_pg_fs_shield", False) and not agent.done:
+                a_exec, shield_info = pg_fs_shield(
+                    agent=agent,
+                    world=self.world,
+                    a_rl=a_rl,
+                    a_guide=a_guide,
+                    args=self.args,
+                )
+                agent.action.u = limit_action_inf_norm(a_exec, 1)
+                agent.network_action = a_rl
+                agent.policy_action = a_guide
+                agent.shield_info = shield_info
+            else:
+                if self.use_CL == True:
+                    if self.CL_ratio < self.Cp:
+                        if self.current_step < self.JS_thre:
+                            agent.action.u = policy_output
+                        else:
+                            agent.action.u = network_output
                     else:
-                        agent.action.u = network_output
+                        act = network_output
+                        agent.action.u = limit_action_inf_norm(act, 1)
+                elif self.use_policy:
+                    agent.action.u = policy_output
                 else:
                     act = network_output
                     agent.action.u = limit_action_inf_norm(act, 1)
-            elif self.use_policy:
-                agent.action.u = policy_output
-            else: 
-                act = network_output
-                agent.action.u = limit_action_inf_norm(act, 1) 
 
 
     def _set_CL(self, CL_ratio):
         glv.set_value('CL_ratio', CL_ratio)
         self.CL_ratio = glv.get_value('CL_ratio')
+        self.world.CL_ratio = self.CL_ratio
 
     # reset rendering assets
     def _reset_render(self) -> None:
@@ -716,7 +736,7 @@ class MultiAgentGraphEnv(MultiAgentBaseEnv):
         # print("step: ", self.current_step)
 
         # set action for each agent
-        if self.use_CL or self.use_policy:
+        if self.use_CL or self.use_policy or getattr(self.args, "use_pg_fs_shield", False):
             policy_u = self.policy_u(self.world, self.gp_type)
         else:
             policy_u = np.zeros((self.num_agents, 2, 1))
