@@ -19,7 +19,9 @@ def set_JS_curriculum(CL_ratio, gp_type):
 
 def guide_policy(world, gp_type):
     """Factory function to select the appropriate policy based on the version"""
-    if gp_type == "navigation_rvo":
+    if gp_type == "navigation":
+        return guide_policy_navigation(world)
+    elif gp_type == "navigation_rvo":
         return guide_policy_navigation_rvo(world)
     elif gp_type == "navigation_cbf":
         return guide_policy_navigation_cbf(world)
@@ -94,6 +96,105 @@ def guide_policy_navigation(world):
         U[i] = u_i.reshape(2,1)
 
     return U
+
+def _clip_velocity_box(v, max_speed):
+    v = np.asarray(v, dtype=np.float32).copy()
+    return np.clip(v, -max_speed, max_speed)
+
+def _time_to_collision(p_rel, v_rel, radius, horizon):
+    a = float(np.dot(v_rel, v_rel))
+    b = 2.0 * float(np.dot(p_rel, v_rel))
+    c = float(np.dot(p_rel, p_rel) - radius * radius)
+
+    if c <= 0.0:
+        return 0.0
+    if a < 1e-8 or b >= 0.0:
+        return None
+
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        return None
+
+    tau = (-b - np.sqrt(disc)) / (2.0 * a)
+    if 0.0 <= tau <= horizon:
+        return float(tau)
+    return None
+
+def _rvo_candidate_velocities(vel_des, vel_now, max_speed):
+    candidates = [vel_des, vel_now, np.zeros(2, dtype=np.float32)]
+    speed_samples = np.linspace(0.0, max_speed, 5)
+    angle_samples = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
+
+    for speed in speed_samples:
+        for angle in angle_samples:
+            candidates.append(
+                np.array([speed * np.cos(angle), speed * np.sin(angle)], dtype=np.float32)
+            )
+
+    for base in (vel_des, vel_now):
+        norm = np.linalg.norm(base)
+        if norm > 1e-6:
+            tangent = np.array([-base[1], base[0]], dtype=np.float32) / norm
+            candidates.append(_clip_velocity_box(base + 0.35 * tangent, max_speed))
+            candidates.append(_clip_velocity_box(base - 0.35 * tangent, max_speed))
+
+    return candidates
+
+def RVO(ego, neighbors_ego, neighbors_dobs, neighbors_obs, vel_des):
+    vel_now = np.asarray(ego.state.p_vel, dtype=np.float32)
+    vel_des = np.asarray(vel_des, dtype=np.float32)
+    max_speed = float(getattr(ego, "max_speed", 1.0) or 1.0)
+    pos_i = np.asarray(ego.state.p_pos, dtype=np.float32)
+    radius_i = float(getattr(ego, "R", getattr(ego, "size", 0.05)))
+    horizon = 1.5
+    margin = 0.05
+
+    vel_des = _clip_velocity_box(vel_des, max_speed)
+    candidates = _rvo_candidate_velocities(vel_des, vel_now, max_speed)
+    moving_neighbors = list(neighbors_ego) + list(neighbors_dobs)
+    static_neighbors = list(neighbors_obs)
+
+    if len(moving_neighbors) == 0 and len(static_neighbors) == 0:
+        return vel_des
+
+    best_v = vel_des
+    best_score = np.inf
+
+    for cand in candidates:
+        cand = _clip_velocity_box(cand, max_speed)
+        score = float(np.sum((cand - vel_des) ** 2)) + 0.05 * float(np.sum((cand - vel_now) ** 2))
+
+        for other in moving_neighbors:
+            pos_j = np.asarray(other.state.p_pos, dtype=np.float32)
+            vel_j = np.asarray(getattr(other.state, "p_vel", np.zeros(2)), dtype=np.float32)
+            radius_j = float(getattr(other, "R", getattr(other, "size", 0.05)))
+            radius = radius_i + radius_j + float(getattr(other, "delta", 0.0) or 0.0) + margin
+            p_rel = pos_i - pos_j
+            rvo_rel_v = 2.0 * cand - vel_now - vel_j
+            tau = _time_to_collision(p_rel, rvo_rel_v, radius, horizon)
+            dist_margin = np.linalg.norm(p_rel) - radius
+            if tau is not None:
+                score += 10.0 * (horizon - tau + 1e-3) / horizon
+            if dist_margin < 0.25:
+                score += 0.5 * (0.25 - dist_margin) ** 2
+
+        for other in static_neighbors:
+            pos_j = np.asarray(other.state.p_pos, dtype=np.float32)
+            radius_j = float(getattr(other, "R", getattr(other, "size", 0.05)))
+            radius = radius_i + radius_j + float(getattr(other, "delta", 0.0) or 0.0) + margin
+            p_rel = pos_i - pos_j
+            tau = _time_to_collision(p_rel, cand, radius, horizon)
+            dist_margin = np.linalg.norm(p_rel) - radius
+            if tau is not None:
+                score += 12.0 * (horizon - tau + 1e-3) / horizon
+            if dist_margin < 0.3:
+                score += 0.8 * (0.3 - dist_margin) ** 2
+
+        if score < best_score:
+            best_score = score
+            best_v = cand
+
+    return _clip_velocity_box(best_v, max_speed)
 
 def guide_policy_navigation_rvo(world):
     egos = world.egos

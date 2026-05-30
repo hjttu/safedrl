@@ -13,7 +13,7 @@ def _flatten(T, N, x):
 
 
 def _cast(x):
-    return x.transpose(1, 2, 0, 3).reshape(-1, *x.shape[3:])
+    return x.transpose(1, 2, 0, *range(3, x.ndim)).reshape(-1, *x.shape[3:])
 
 
 class GSReplayBuffer(object):

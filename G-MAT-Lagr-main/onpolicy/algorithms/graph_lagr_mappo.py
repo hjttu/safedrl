@@ -216,8 +216,8 @@ class GS_MAPPO():
         share_obs_batch, obs_batch, node_obs_batch, adj_batch, agent_id_batch, \
         share_agent_id_batch, rnn_states_batch, rnn_states_critic_batch, \
         actions_batch, value_preds_batch, return_batch, masks_batch, \
-        active_masks_batch, old_action_log_probs_batch, adv_targ, \
-        logits_bias_batch, available_actions_batch, factor_batch, cost_preds_batch, \
+        active_masks_batch, old_action_log_probs_batch, logits_bias_batch, \
+        adv_targ, available_actions_batch, factor_batch, cost_preds_batch, \
         cost_returns_batch, rnn_states_cost_batch, cost_adv_targ, \
         aver_episode_costs = sample
 
