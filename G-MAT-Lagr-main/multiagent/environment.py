@@ -278,10 +278,9 @@ class MultiAgentBaseEnv(gym.Env):
                 # agent.state.p_vel = np.array([0,0])
                 # print("agent done, decellerate to zero")
 
-            a_rl = limit_action_inf_norm(network_output, 1)
-            a_guide = limit_action_inf_norm(policy_output, 1)
-
             if getattr(self.args, "use_pg_fs_shield", False) and not agent.done:
+                a_rl = limit_action_inf_norm(network_output.copy(), 1)
+                a_guide = limit_action_inf_norm(policy_output.copy(), 1)
                 a_exec, shield_info = pg_fs_shield(
                     agent=agent,
                     world=self.world,

@@ -198,6 +198,8 @@ def update_deadlock_state(agent, world, filter_info, args):
     dist = float(np.linalg.norm(get_goal_pos(agent, world) - _entity_pos(agent)))
     speed = float(np.linalg.norm(_speed(agent)))
     last_goal_dist = getattr(agent, "last_goal_dist", dist)
+    if last_goal_dist is None:
+        last_goal_dist = dist
     progress = float(last_goal_dist - dist)
 
     stuck_count = int(getattr(agent, "stuck_count", 0))
