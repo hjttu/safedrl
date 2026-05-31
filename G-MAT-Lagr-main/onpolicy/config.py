@@ -281,6 +281,23 @@ def get_config():
     parser.add_argument("--soft_safety_risk_coef", type=float, default=1.0)
     parser.add_argument("--soft_progress_risk_coef", type=float, default=0.2)
     parser.add_argument("--soft_deadlock_risk_coef", type=float, default=0.1)
+    # dynamic soft mask scaling
+    parser.add_argument("--use_dynamic_soft_mask", type=lambda x: bool(strtobool(x)), default=True)
+    parser.add_argument("--soft_mask_min_scale", type=float, default=0.35)
+    parser.add_argument("--soft_mask_max_scale", type=float, default=1.00)
+    parser.add_argument("--soft_mask_risk_scale_coef", type=float, default=0.40)
+    parser.add_argument("--soft_mask_deadlock_scale_coef", type=float, default=0.30)
+    # progress-aware soft mask
+    parser.add_argument("--use_progress_aware_soft_mask", type=lambda x: bool(strtobool(x)), default=True)
+    parser.add_argument("--progress_relief_coef", type=float, default=0.35)
+    parser.add_argument("--progress_relief_clip", type=float, default=0.50)
+    parser.add_argument("--progress_relief_temperature", type=float, default=3.0)
+    # priority-aware soft mask
+    parser.add_argument("--use_priority_aware_soft_mask", type=lambda x: bool(strtobool(x)), default=True)
+    parser.add_argument("--priority_soft_coef", type=float, default=0.25)
+    parser.add_argument("--priority_soft_clip", type=float, default=0.40)
+    # logging / diagnostics
+    parser.add_argument("--log_soft_mask_details", type=lambda x: bool(strtobool(x)), default=True)
 
     # CBF / mask
     parser.add_argument("--cbf_alpha", type=float, default=0.8)

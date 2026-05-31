@@ -333,7 +333,7 @@ def compute_soft_action_bias(agent, world, args):
     action_mapping = np.linspace(-1.0, 1.0, 20, dtype=np.float32)
     neighbors = get_neighbors(agent, world)
     risk = risk_score(agent, world, neighbors)
-    update_priority(agent, world, risk, args)
+    priority = update_priority(agent, world, risk, args)
 
     dt = float(getattr(world, "dt", _arg(args, "shield_dt", 0.1)))
     alpha = float(_arg(args, "cbf_alpha", 1.0))
@@ -342,10 +342,53 @@ def compute_soft_action_bias(agent, world, args):
     progress_coef = float(_arg(args, "soft_progress_risk_coef", 0.2))
     deadlock_coef = float(_arg(args, "soft_deadlock_risk_coef", 0.1))
     current_deadlock_score = float(getattr(agent, "deadlock_score", 0.0))
+    base_scale = float(_arg(args, "soft_mask_scale", 1.0))
+
+    if _arg(args, "use_dynamic_soft_mask", True):
+        risk_gate = _sigmoid(float(_arg(args, "risk_gain", 5.0)) * (risk - float(_arg(args, "risk_threshold", 0.6))))
+        deadlock_gate = _sigmoid(
+            float(_arg(args, "deadlock_gain", 6.0))
+            * (current_deadlock_score - float(_arg(args, "deadlock_threshold", 0.6)))
+        )
+        scale_multiplier = (
+            1.0
+            + float(_arg(args, "soft_mask_risk_scale_coef", 0.40)) * risk_gate
+            + float(_arg(args, "soft_mask_deadlock_scale_coef", 0.30)) * deadlock_gate
+        )
+        dynamic_scale = base_scale * scale_multiplier
+        dynamic_scale = float(
+            np.clip(
+                dynamic_scale,
+                float(_arg(args, "soft_mask_min_scale", 0.35)),
+                float(_arg(args, "soft_mask_max_scale", 1.00)),
+            )
+        )
+    else:
+        dynamic_scale = base_scale
+
+    local_priorities = [
+        float(getattr(other, "priority"))
+        for other in neighbors
+        if hasattr(other, "priority")
+    ]
+    local_priority_mean = float(np.mean(local_priorities)) if local_priorities else float(priority)
+    priority_modifier = 1.0
+    if _arg(args, "use_priority_aware_soft_mask", True):
+        priority_delta = float(priority) - local_priority_mean
+        raw = -float(_arg(args, "priority_soft_coef", 0.25)) * np.tanh(priority_delta)
+        raw = float(
+            np.clip(
+                raw,
+                -float(_arg(args, "priority_soft_clip", 0.40)),
+                float(_arg(args, "priority_soft_clip", 0.40)),
+            )
+        )
+        priority_modifier = float(np.clip(1.0 + raw, 0.6, 1.4))
 
     p_i = _entity_pos(agent)
     v_i = _speed(agent)
     joint_risk = np.zeros((20, 20), dtype=np.float32)
+    progress_relief_matrix = np.zeros((20, 20), dtype=np.float32)
 
     for k, ax in enumerate(action_mapping):
         for l, ay in enumerate(action_mapping):
@@ -379,40 +422,70 @@ def compute_soft_action_bias(agent, world, args):
 
             progress = predict_progress(agent, world, action)
             progress_risk = max(0.0, -progress - progress_tolerance)
-            joint_risk[k, l] = (
+            candidate_risk = (
                 safety_coef * safety_violation
                 + progress_coef * progress_risk
                 + deadlock_coef * current_deadlock_score
             )
+            if _arg(args, "use_progress_aware_soft_mask", True):
+                positive_progress = max(float(progress), 0.0)
+                relief = float(_arg(args, "progress_relief_coef", 0.35)) * (
+                    1.0
+                    - np.exp(
+                        -float(_arg(args, "progress_relief_temperature", 3.0))
+                        * positive_progress
+                    )
+                )
+                relief = float(np.clip(relief, 0.0, float(_arg(args, "progress_relief_clip", 0.50))))
+            else:
+                relief = 0.0
+            progress_relief_matrix[k, l] = relief
+            candidate_risk = max(0.0, candidate_risk * (1.0 - relief))
+            joint_risk[k, l] = max(0.0, candidate_risk * priority_modifier)
 
     beta = float(_arg(args, "soft_axis_lme_beta", 5.0))
     beta = beta if abs(beta) > EPS else 1.0
-    max_x = np.max(beta * joint_risk, axis=1, keepdims=True)
-    risk_x = (np.log(np.mean(np.exp(beta * joint_risk - max_x), axis=1)) + max_x[:, 0]) / beta
-    max_y = np.max(beta * joint_risk, axis=0, keepdims=True)
-    risk_y = (np.log(np.mean(np.exp(beta * joint_risk - max_y), axis=0)) + max_y[0, :]) / beta
+    beta_risk = beta * joint_risk
+    max_x = np.max(beta_risk, axis=1, keepdims=True)
+    risk_x = (max_x[:, 0] + np.log(np.mean(np.exp(beta_risk - max_x), axis=1) + 1e-8)) / beta
+    max_y = np.max(beta_risk, axis=0, keepdims=True)
+    risk_y = (max_y[0, :] + np.log(np.mean(np.exp(beta_risk - max_y), axis=0) + 1e-8)) / beta
 
     threshold = float(_arg(args, "soft_risk_threshold", 0.05))
-    scale = float(_arg(args, "soft_mask_scale", 1.0))
     temperature = float(_arg(args, "soft_mask_temperature", 3.0))
     max_bias = abs(float(_arg(args, "soft_mask_max_bias", 6.0)))
 
     def risk_to_bias(axis_risk):
         excess = np.maximum(axis_risk - threshold, 0.0)
-        bias = -scale * np.expm1(temperature * excess)
+        bias = -dynamic_scale * np.expm1(temperature * excess)
         return np.clip(bias, -max_bias, 0.0)
 
     logits_bias = np.stack([risk_to_bias(risk_x), risk_to_bias(risk_y)], axis=0)
     logits_bias = np.nan_to_num(logits_bias, nan=0.0, posinf=0.0, neginf=-max_bias).astype(np.float32)
+    logits_bias = np.clip(logits_bias, -max_bias, 0.0).astype(np.float32)
 
     agent.soft_bias_mean = float(np.mean(np.abs(logits_bias)))
     agent.soft_bias_max = float(np.max(np.abs(logits_bias)))
     agent.soft_danger_ratio = float(np.mean(logits_bias < -1e-6))
+    agent.soft_dynamic_scale = float(dynamic_scale)
+    agent.soft_priority_modifier = float(priority_modifier)
+    agent.soft_progress_relief_mean = float(np.mean(progress_relief_matrix))
+    agent.soft_joint_risk_mean = float(np.mean(joint_risk))
+    agent.soft_joint_risk_max = float(np.max(joint_risk))
     if not hasattr(agent, "shield_info") or agent.shield_info is None:
         agent.shield_info = {}
-    agent.shield_info["soft_bias_mean"] = agent.soft_bias_mean
-    agent.shield_info["soft_bias_max"] = agent.soft_bias_max
-    agent.shield_info["soft_danger_ratio"] = agent.soft_danger_ratio
+    agent.shield_info.update(
+        {
+            "soft_bias_mean": agent.soft_bias_mean,
+            "soft_bias_max": agent.soft_bias_max,
+            "soft_danger_ratio": agent.soft_danger_ratio,
+            "soft_dynamic_scale": agent.soft_dynamic_scale,
+            "soft_priority_modifier": agent.soft_priority_modifier,
+            "soft_progress_relief_mean": agent.soft_progress_relief_mean,
+            "soft_joint_risk_mean": agent.soft_joint_risk_mean,
+            "soft_joint_risk_max": agent.soft_joint_risk_max,
+        }
+    )
 
     return logits_bias
 
