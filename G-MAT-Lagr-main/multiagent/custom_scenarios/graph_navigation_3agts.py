@@ -16,7 +16,8 @@ from multiagent.scenario import BaseScenario
 
 entity_mapping = {"agent": 0, "target": 1, "obstacle": 2, "dynamic_obstacle": 3}
 global SID
-SID = [0,0,2,2,3,3,4,4,5,5,8,8,9,9,9]
+SID_TEMPLATE = [0,0,2,2,3,3,4,4,5,5,8,8,9,9,9]
+SID = SID_TEMPLATE.copy()
 
 class Scenario(BaseScenario):
 
@@ -163,17 +164,21 @@ class Scenario(BaseScenario):
         #     print(f"Target {i} position: {world.targets[i].state.p_pos}")
         '''
         
-        # Randomly select one of 10 scenarios
-        global SID
-        # sid = np.random.randint(0, 10)
-        sid = SID.pop(0)
-        print(f"Selected Scenario ID: {sid}")
-        
-
         if self.num_egos == 3:
             from multiagent.random_scenarios.nav_3agt_scenarios import Scenarios
         else: 
             raise ValueError("This scenario is only for 3 agents.")
+
+        eval_sid = int(getattr(getattr(world, "args", None), "eval_scenario_id", -1))
+        if eval_sid >= 0:
+            sid = eval_sid % len(Scenarios.data)
+        else:
+            global SID
+            if len(SID) == 0:
+                SID = SID_TEMPLATE.copy()
+            sid = SID.pop(0)
+        if getattr(getattr(world, "args", None), "log_scenario_id", False):
+            print(f"Selected Scenario ID: {sid}")
         
         scenario = Scenarios.data[sid]
         # Assign obstacles

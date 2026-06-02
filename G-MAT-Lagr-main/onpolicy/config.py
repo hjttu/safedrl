@@ -395,6 +395,8 @@ def get_config():
     parser.add_argument("--num_obstacle", type=int, default=4, help="the number of obstacles")
     parser.add_argument("--num_dynamic_obs", type=int, default=4, help="the number of dynamic obstacles")
     parser.add_argument("--num_agents", type=int, default=4, help="the number of agents")
+    parser.add_argument("--eval_scenario_id", type=int, default=-1, help="fixed scenario id for render/eval; -1 keeps the scenario default")
+    parser.add_argument("--log_scenario_id", type=lambda x: bool(strtobool(x)), default=False, help="whether to print selected scenario id on reset")
     parser.add_argument('--scenario_name', type=str,
                         default='simple_formation_4agts', help="Which scenario to run on")
     parser.add_argument("--gp_type", type=str,

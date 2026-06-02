@@ -17,7 +17,8 @@ from multiagent.scenario import BaseScenario
 entity_mapping = {"agent": 0, "target": 1, "obstacle": 2, "dynamic_obstacle": 3}
 
 global SID
-SID = [1,1,3,3,4,4,0,0,2,2,2] # the last is added extra to prevent bugs and make succeding data restore
+SID_TEMPLATE = [1,1,3,3,4,4,0,0,2,2,2] # the last is added extra to prevent bugs and make succeding data restore
+SID = SID_TEMPLATE.copy()
 
 class Scenario(BaseScenario):
 
@@ -114,18 +115,21 @@ class Scenario(BaseScenario):
         world.num_obstacle_collisions = np.zeros(self.num_egos)
         world.num_agent_collisions = np.zeros(self.num_egos)
 
-        # Randomly select one of 5 scenarios
-        # sid = np.random.randint(0, 10)
-
-        global SID
-        sid = SID.pop(0)
-        print(f"Selected Scenario ID: {sid}")
-
-                # sid = 0
         if self.num_egos == 6:
             from multiagent.random_scenarios.nav_6agt_scenarios import Scenarios
         else: 
             raise ValueError("This scenario is only for 6 agents.")
+
+        eval_sid = int(getattr(getattr(world, "args", None), "eval_scenario_id", -1))
+        if eval_sid >= 0:
+            sid = eval_sid % len(Scenarios.data)
+        else:
+            global SID
+            if len(SID) == 0:
+                SID = SID_TEMPLATE.copy()
+            sid = SID.pop(0)
+        if getattr(getattr(world, "args", None), "log_scenario_id", False):
+            print(f"Selected Scenario ID: {sid}")
         
         scenario = Scenarios.data[sid]
         # Assign obstacles

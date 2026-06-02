@@ -106,13 +106,18 @@ class Scenario(BaseScenario):
         world.num_obstacle_collisions = np.zeros(self.num_egos)
         world.num_agent_collisions = np.zeros(self.num_egos)
 
-        # Randomly select one of 10 scenarios
-        sid = np.random.randint(0, 10)
-        # sid = 2
         if self.num_egos == 9:
             from multiagent.random_scenarios.nav_9agt_scenarios import Scenarios
         else: 
             raise ValueError("This scenario is only for 9 agents.")
+
+        eval_sid = int(getattr(getattr(world, "args", None), "eval_scenario_id", -1))
+        if eval_sid >= 0:
+            sid = eval_sid % len(Scenarios.data)
+        else:
+            sid = np.random.randint(0, len(Scenarios.data))
+        if getattr(getattr(world, "args", None), "log_scenario_id", False):
+            print(f"Selected Scenario ID: {sid}")
         
         scenario = Scenarios.data[sid]
         # Assign obstacles
