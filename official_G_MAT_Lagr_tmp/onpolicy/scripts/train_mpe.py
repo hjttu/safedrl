@@ -1,16 +1,21 @@
 #!/usr/bin/env python
 import argparse
+import os
+import sys
 from distutils.util import strtobool
+from pathlib import Path
+
+# Make imports independent of the directory used to launch this script.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import wandb
 import socket
 import setproctitle
 import numpy as np
-from pathlib import Path
 import torch
 from onpolicy import global_var as glv
-import os, sys
-
-sys.path.append(os.path.abspath(os.getcwd()))
 
 from utils.utils import print_args, print_box, connected_to_internet
 from onpolicy.config import get_config
