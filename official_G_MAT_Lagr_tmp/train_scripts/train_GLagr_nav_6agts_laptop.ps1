@@ -53,7 +53,18 @@ try {
         "--log_interval", "1"
     )
 
+    # Windows PowerShell converts native stderr output (including harmless
+    # deprecation warnings) into error records. Let Python finish, then use its
+    # actual exit code to decide whether training failed.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     python @trainArgs 2>&1 | Tee-Object -FilePath "train_6agents_laptop.log"
+    $pythonExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $previousErrorActionPreference
+
+    if ($pythonExitCode -ne 0) {
+        throw "Training process exited with code $pythonExitCode."
+    }
 }
 finally {
     Pop-Location
