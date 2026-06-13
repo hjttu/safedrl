@@ -34,11 +34,11 @@ CUDA_VISIBLE_DEVICES='1' python  ../onpolicy/scripts/train_mpe.py \
 --guide_cp 0.4 --cp 0.4 --js_ratio 0.0 \
 --entropy_coef 0.02 --cost_value_loss_coef 1 --safety_bound 1.0 \
 --lamda_lagr 0.1 --lagrangian_coef_rate 5e-5 --lamda_scale 0.3 \
---use_wandb "True" \
+--use_wandb "False" \
 --n_training_threads 16 --n_rollout_threads 32 \
 --use_lstm "True" \
 --episode_length ${ep_lens} \
---num_env_steps 4000000 \
+--num_env_steps 2000000 \
 --ppo_epoch 15 --use_ReLU --gain 0.01 --lr 1e-4 --critic_lr 1e-4 --cost_critic_lr 1e-4 \
 --user_name "finleygou" \
 --use_cent_obs "False" \

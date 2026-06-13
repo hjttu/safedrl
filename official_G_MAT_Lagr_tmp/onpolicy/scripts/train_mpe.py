@@ -35,6 +35,8 @@ glv.set_value('CL_ratio',0.0)
 def make_train_env(all_args: argparse.Namespace):
     def get_env_fn(rank: int):
         def init_env():
+            env_seed = all_args.seed + rank * 1000
+            np.random.seed(env_seed)
             if all_args.env_name == "MPE":
                 env = MPEEnv(all_args)
             elif all_args.env_name == "GraphMPE" or all_args.env_name == "GSMPE":
@@ -42,7 +44,7 @@ def make_train_env(all_args: argparse.Namespace):
             else:
                 print(f"Can not support the {all_args.env_name} environment")
                 raise NotImplementedError
-            env.seed(all_args.seed + rank * 1000)
+            env.seed(env_seed)
             return env
 
         return init_env
@@ -62,6 +64,8 @@ def make_train_env(all_args: argparse.Namespace):
 def make_eval_env(all_args: argparse.Namespace):
     def get_env_fn(rank: int):
         def init_env():
+            env_seed = all_args.seed * 50000 + rank * 10000
+            np.random.seed(env_seed)
             if all_args.env_name == "MPE":
                 env = MPEEnv(all_args)
             elif all_args.env_name == "GraphMPE" or all_args.env_name == "GSMPE":
@@ -69,7 +73,7 @@ def make_eval_env(all_args: argparse.Namespace):
             else:
                 print(f"Can not support the {all_args.env_name} environment")
                 raise NotImplementedError
-            env.seed(all_args.seed * 50000 + rank * 10000)
+            env.seed(env_seed)
             return env
 
         return init_env
