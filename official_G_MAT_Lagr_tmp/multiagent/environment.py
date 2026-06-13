@@ -91,6 +91,9 @@ class MultiAgentBaseEnv(gym.Env):
         self.discrete_action_space = (
             args.env_name == "GSMPE" and args.use_graph_cbf_shield
         )
+        self.action_grid_size = args.action_grid_size
+        if self.discrete_action_space and self.action_grid_size < 3:
+            raise ValueError("action_grid_size must be at least 3")
         # self.discrete_action_space = discrete_action
 
         # if true, action is a number 0...N,
@@ -119,9 +122,11 @@ class MultiAgentBaseEnv(gym.Env):
 
             # physical action space
             if self.discrete_action_space:
-                # Joint 20 x 20 acceleration table. A single categorical action is
-                # required so the CBF shield can mask unsafe (ux, uy) pairs.
-                u_action_space = spaces.Discrete(20 * 20)
+                # A single joint categorical action lets the CBF shield mask
+                # unsafe (ux, uy) pairs before sampling.
+                u_action_space = spaces.Discrete(
+                    self.action_grid_size * self.action_grid_size
+                )
             else:
                 u_action_space = MultiDiscrete([[0, 19], [0, 19]])  # -1~1, 20 values
             if agent.movable:
@@ -254,11 +259,12 @@ class MultiAgentBaseEnv(gym.Env):
         
         if agent.movable:
             
-            action_mapping = np.linspace(-1, 1, 20)
             if isinstance(action_space, spaces.Discrete):
-                ux = action_mapping[action[0] // 20]
-                uy = action_mapping[action[0] % 20]
+                action_mapping = np.linspace(-1, 1, self.action_grid_size)
+                ux = action_mapping[action[0] // self.action_grid_size]
+                uy = action_mapping[action[0] % self.action_grid_size]
             else:
+                action_mapping = np.linspace(-1, 1, 20)
                 ux = np.dot(action[0], action_mapping)
                 uy = np.dot(action[1], action_mapping)
 

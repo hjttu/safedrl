@@ -197,6 +197,8 @@ def get_config():
     parser.add_argument("--obs_type", type=str, choices=["local", "global", "nbd"], default="global", help="Whether to use local obs for navigation.py")
     parser.add_argument("--num_nbd_entities", type=int, default=3, help="Number of entities to be considered as neighbors for `obs_type==ndb_obs`")
     parser.add_argument("--use_comm", type=lambda x: bool(strtobool(x)), default=False, help="Whether to use communication channel for agent observation")
+    parser.add_argument("--action_grid_size", type=int, default=20,
+                        help="number of acceleration values per axis for the joint discrete action table")
 
     # replay buffer parameters
     parser.add_argument("--episode_length", type=int, default=200, help="Max length for any episode")

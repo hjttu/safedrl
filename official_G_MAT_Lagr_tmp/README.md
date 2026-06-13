@@ -13,6 +13,12 @@ environment action consistent with the PPO log probability. Because the action
 head is now a joint 400-class categorical distribution, actor checkpoints made
 with the former two-branch `MultiDiscrete` head are not shape-compatible.
 
+For an 8 GB laptop GPU, use the Linux script
+`train_scripts/train_GLagr_nav_6agts_laptop.sh` or the Windows PowerShell script
+`train_scripts/train_GLagr_nav_6agts_laptop.ps1`. Both keep the same Graph-CBF,
+safe-guide, ranking, Lagrangian, and recurrent PPO objectives while using a
+`9 x 9` action table and smaller rollout/network settings.
+
 ## Overview
 This is the implementation of *Primal-Dual based Safe Multi-Agent Reinforcement Learning with Graph Information Aggregation*, accepted by 2026 IFAC world congress.
 
