@@ -127,14 +127,6 @@ class MultiAgentBaseEnv(gym.Env):
             if agent.movable:
                 total_action_space.append(u_action_space)
 
-            # communication action space
-            if self.discrete_action_space:
-                c_action_space = spaces.Discrete(world.dim_c)
-            else:
-                c_action_space = spaces.Box(
-                    low=0.0, high=1.0, shape=(world.dim_c,), dtype=np.float32
-                )
-
             # total action space
             if len(total_action_space) > 1:
                 # all action spaces are discrete,
