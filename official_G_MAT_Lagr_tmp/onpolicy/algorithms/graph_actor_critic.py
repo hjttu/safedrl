@@ -14,7 +14,10 @@ from onpolicy.algorithms.utils.mlp import MLPBase
 from onpolicy.algorithms.utils.rnn import RNNLayer
 from onpolicy.algorithms.utils.lstm import LSTMLayer
 from onpolicy.algorithms.utils.act import ACTLayer
-from onpolicy.algorithms.utils.distributions import FixedCategorical
+from onpolicy.algorithms.utils.distributions import (
+    FixedCategorical,
+    categorical_mask_value,
+)
 from onpolicy.algorithms.utils.popart import PopArt
 from onpolicy.utils.util import get_shape_from_obs_space
 from multiagent.action_table import build_action_table_np
@@ -341,7 +344,9 @@ class GR_Actor(nn.Module):
                 final_mask = final_mask & available_actions.bool()
             final_mask = self._make_nonempty_mask(final_mask, margins, obs)
         logits = base_logits + self.safety_score_coef * safety_score
-        logits = logits.masked_fill(~final_mask, torch.finfo(logits.dtype).min)
+        logits = logits.masked_fill(
+            ~final_mask, categorical_mask_value(logits)
+        )
         return FixedCategorical(logits=logits), margins, hard_mask, safety_score
 
     def _extract_actor_features(
@@ -568,8 +573,9 @@ class GR_Actor(nn.Module):
             local_logits = (
                 self.act.action_out.linear(actor_features)
                 + self.safety_score_coef * safety_score
-            ).masked_fill(
-                ~local_loss_mask, torch.finfo(actor_features.dtype).min
+            )
+            local_logits = local_logits.masked_fill(
+                ~local_loss_mask, categorical_mask_value(local_logits)
             )
             local_dist = FixedCategorical(logits=local_logits)
             guide_actions = self._safe_guide_actions(obs, local_loss_mask)

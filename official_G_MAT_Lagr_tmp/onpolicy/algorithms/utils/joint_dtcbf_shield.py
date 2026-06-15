@@ -2,7 +2,10 @@ from typing import Dict, Tuple
 
 import torch
 
-from onpolicy.algorithms.utils.distributions import FixedCategorical
+from onpolicy.algorithms.utils.distributions import (
+    FixedCategorical,
+    categorical_mask_value,
+)
 
 
 class DecentralizedPriorityJointDTCBFShield:
@@ -202,7 +205,7 @@ class DecentralizedPriorityJointDTCBFShield:
                 final_masks[b, i] = mask_i
                 final_domain_sizes.append(int(mask_i.sum().item()))
                 masked_logits = logits[b, i].masked_fill(
-                    ~mask_i, torch.finfo(logits.dtype).min
+                    ~mask_i, categorical_mask_value(logits[b, i])
                 )
                 dist = FixedCategorical(logits=masked_logits[None])
                 action = dist.mode() if deterministic else dist.sample()

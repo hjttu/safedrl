@@ -1,5 +1,4 @@
 import torch
-import torch
 import torch.nn as nn
 from .util import init
 
@@ -10,6 +9,13 @@ Modify standard PyTorch distributions so they to make compatible with this codeb
 #
 # Standardize distribution interfaces
 #
+
+
+def categorical_mask_value(logits):
+    """Return a finite unavailable-action logit compatible with AMP dtypes."""
+    if logits.dtype in (torch.float16, torch.bfloat16):
+        return -1e4
+    return torch.finfo(logits.dtype).min
 
 
 # Categorical
@@ -91,7 +97,9 @@ class Categorical(nn.Module):
         x = self.linear(x)
         # supress the logits at all non-available actions
         if available_actions is not None:
-            x[available_actions == 0] = torch.finfo(x.dtype).min
+            x = x.masked_fill(
+                available_actions == 0, categorical_mask_value(x)
+            )
         return FixedCategorical(logits=x)
 
 

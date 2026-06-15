@@ -3,6 +3,7 @@ import numpy as np
 import torch
 
 from onpolicy.algorithms.graph_actor_critic import GR_Actor
+from onpolicy.algorithms.utils.distributions import categorical_mask_value
 from onpolicy.config import get_config, graph_config
 
 
@@ -131,3 +132,12 @@ def test_final_mask_reproduces_rollout_log_probability():
         available_actions=final_mask
     )
     assert torch.allclose(rollout_log_probs, update_log_probs, atol=1e-6)
+
+
+def test_categorical_mask_value_is_amp_safe():
+    logits = torch.zeros(2, 3, dtype=torch.float16)
+    mask = torch.tensor([[True, False, True], [False, True, True]])
+    masked = logits.masked_fill(~mask, categorical_mask_value(logits))
+    dist = torch.distributions.Categorical(logits=masked)
+    assert torch.isfinite(masked).all()
+    assert torch.all(dist.probs[~mask] == 0.0)
