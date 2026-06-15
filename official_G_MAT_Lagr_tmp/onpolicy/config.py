@@ -297,6 +297,13 @@ def get_config():
                         choices=["constant_action"])
     parser.add_argument("--dtcbf_min_margin", type=float, default=0.0)
     parser.add_argument("--dtcbf_early_brake_buffer", type=float, default=0.05)
+    parser.add_argument("--predictive_hard_neighbors", type=int, default=1,
+                        help="riskiest neighbors using H-step predictive hard masks")
+    parser.add_argument("--min_joint_domain_size", type=int, default=5,
+                        help="fallback to H=1 if predictive hard mask is smaller")
+    parser.add_argument("--predictive_soft_penalty_coef", type=float, default=2.0)
+    parser.add_argument("--use_soft_predictive_penalty",
+                        type=lambda x: bool(strtobool(x)), default=True)
     parser.add_argument("--recovery_margin_coef", type=float, default=10.0)
     parser.add_argument("--recovery_logit_coef", type=float, default=1.0)
     parser.add_argument("--recovery_progress_coef", type=float, default=0.1)

@@ -121,7 +121,7 @@ def test_final_mask_reproduces_rollout_log_probability():
     rnn_states = torch.zeros(1, actor._recurrent_N, actor.hidden_size)
     masks = torch.ones(1, 1)
     final_mask = torch.zeros(1, actor.action_table.shape[0])
-    final_mask[:, [0, 10, 20]] = 1.0
+    final_mask[:, [0, 10, 20]] = torch.tensor([1.0, 0.5, 0.2])
 
     actions, rollout_log_probs, _ = actor.forward(
         obs, node_obs, adj, agent_id, rnn_states, masks,

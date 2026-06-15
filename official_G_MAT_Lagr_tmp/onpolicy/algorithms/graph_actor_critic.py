@@ -337,13 +337,17 @@ class GR_Actor(nn.Module):
         safety_input = torch.cat([graph_context, action_emb, cbf_features], dim=-1)
         safety_score = self.graph_cbf_head(safety_input).squeeze(-1)
         if self.use_joint_dtcbf_shield and available_actions is not None:
-            final_mask = available_actions.bool()
+            action_weights = available_actions.to(dtype=base_logits.dtype)
+            final_mask = action_weights > 0
         else:
+            action_weights = None
             final_mask = hard_mask
             if available_actions is not None:
                 final_mask = final_mask & available_actions.bool()
             final_mask = self._make_nonempty_mask(final_mask, margins, obs)
         logits = base_logits + self.safety_score_coef * safety_score
+        if action_weights is not None:
+            logits = logits + torch.log(action_weights.clamp_min(1e-4))
         logits = logits.masked_fill(
             ~final_mask, categorical_mask_value(logits)
         )

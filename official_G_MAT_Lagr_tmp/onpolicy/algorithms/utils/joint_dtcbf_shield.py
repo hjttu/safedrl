@@ -10,7 +10,7 @@ from onpolicy.algorithms.utils.distributions import (
 
 
 class DecentralizedPriorityJointDTCBFShield:
-    """Priority shield with predictive DTCBF, local repair, and recovery."""
+    """Priority shield with immediate hard and predictive mixed constraints."""
 
     def __init__(self, args, action_table, device):
         self.args = args
@@ -23,7 +23,6 @@ class DecentralizedPriorityJointDTCBFShield:
         self.max_edge_dist = args.max_edge_dist
         self.max_neighbors = args.max_shield_neighbors
         self.priority_metric = args.priority_metric
-        self.no_safe_action_strategy = args.no_safe_action_strategy
         self.backup_action_mode = args.backup_action_mode
         self.graph_feat_type = args.graph_feat_type
         self.horizon = max(int(getattr(args, "dtcbf_horizon", 3)), 1)
@@ -33,6 +32,18 @@ class DecentralizedPriorityJointDTCBFShield:
         self.min_margin = float(getattr(args, "dtcbf_min_margin", 0.0))
         self.early_brake_buffer = float(
             getattr(args, "dtcbf_early_brake_buffer", 0.05)
+        )
+        self.predictive_hard_neighbors = max(
+            int(getattr(args, "predictive_hard_neighbors", 1)), 0
+        )
+        self.min_joint_domain_size = max(
+            int(getattr(args, "min_joint_domain_size", 5)), 1
+        )
+        self.predictive_soft_penalty_coef = float(
+            getattr(args, "predictive_soft_penalty_coef", 2.0)
+        )
+        self.use_soft_predictive_penalty = bool(
+            getattr(args, "use_soft_predictive_penalty", True)
         )
         self.recovery_margin_coef = float(
             getattr(args, "recovery_margin_coef", 10.0)
@@ -73,15 +84,6 @@ class DecentralizedPriorityJointDTCBFShield:
             ego_radius = node_obs_i[ego_index_i, 4]
         return rel_pos, rel_vel, ego_radius, node_obs_i[other_index, 4]
 
-    def _agent_velocity(self, node_obs_i, ego_index):
-        if self.graph_feat_type == "global":
-            return node_obs_i[ego_index, 2:4]
-        entity_types = node_obs_i[:, -1].long()
-        targets = torch.nonzero(entity_types == 1, as_tuple=False).flatten()
-        if targets.numel() > 0:
-            return node_obs_i[targets[0], 2:4]
-        return torch.zeros(2, dtype=node_obs_i.dtype, device=node_obs_i.device)
-
     def _goal_direction(self, node_obs_i, ego_index, agent_slot, num_agents):
         target_index = num_agents + agent_slot
         if target_index >= node_obs_i.shape[0]:
@@ -97,25 +99,13 @@ class DecentralizedPriorityJointDTCBFShield:
             direction = -node_obs_i[target_index, 0:2]
         return direction / direction.norm().clamp_min(1e-6)
 
-    def _backup_index(self, node_obs_i, ego_index):
-        if self.backup_action_mode == "zero":
-            target = torch.zeros(2, device=self.device)
-        else:
-            velocity = self._agent_velocity(node_obs_i, ego_index)
-            target = torch.clamp(
-                -velocity / max(self.max_accel * self.dt, 1e-8),
-                -1.0,
-                1.0,
-            )
-        distances = (self.action_table - target).square().sum(-1)
-        return int(distances.argmin().item())
-
-    def pairwise_compatibility(
+    def multi_step_pairwise_margin_vector(
         self,
         node_obs_i,
         ego_index_i,
         other_index,
         fixed_action_j,
+        horizon,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.predict_mode != "constant_action":
             raise ValueError(
@@ -134,8 +124,8 @@ class DecentralizedPriorityJointDTCBFShield:
         accel_i = self.action_table * self.max_accel
         accel_j = self.action_table[int(fixed_action_j)] * self.max_accel
         relative_accel = accel_i - accel_j[None]
-        horizon_margins = []
-        for step in range(1, self.horizon + 1):
+        margins = []
+        for step in range(1, max(int(horizon), 1) + 1):
             elapsed = step * self.dt
             rel_pos_k = (
                 rel_pos[None]
@@ -143,10 +133,20 @@ class DecentralizedPriorityJointDTCBFShield:
                 + 0.5 * elapsed ** 2 * relative_accel
             )
             h_k = rel_pos_k.square().sum(-1) - clearance.square()
-            decay = (1.0 - self.alpha) ** step
-            horizon_margins.append(h_k - decay * h_now)
-        margins = torch.stack(horizon_margins).min(dim=0).values
-        return margins >= self.min_margin, margins
+            margins.append(h_k - (1.0 - self.alpha) ** step * h_now)
+        min_margin = torch.stack(margins).min(dim=0).values
+        return min_margin >= self.min_margin, min_margin
+
+    def pairwise_compatibility(
+        self, node_obs_i, ego_index_i, other_index, fixed_action_j
+    ):
+        return self.multi_step_pairwise_margin_vector(
+            node_obs_i,
+            ego_index_i,
+            other_index,
+            fixed_action_j,
+            self.horizon,
+        )
 
     def _priority(self, node_obs_i, adj_i, ego_index, agent_identifier):
         if self.priority_metric == "agent_id":
@@ -184,6 +184,8 @@ class DecentralizedPriorityJointDTCBFShield:
         ego_i = ego_indices[i]
         neighbors = []
         for j, action_j in selected.items():
+            if j == i:
+                continue
             other_index = ego_indices[j]
             distance = float(adj_i[ego_i, other_index].item())
             if 0.0 < distance <= self.max_edge_dist:
@@ -191,41 +193,113 @@ class DecentralizedPriorityJointDTCBFShield:
         neighbors.sort(key=lambda item: item[0])
         return neighbors[: self.max_neighbors]
 
-    def _conditional_mask(
+    def _constraint_state(
         self, i, selected, local_mask_i, node_obs_b, adj_b, ego_indices
     ):
-        mask_i = local_mask_i.bool().clone()
-        action_count = mask_i.shape[0]
-        combined_margin = torch.full(
-            (action_count,),
-            torch.finfo(node_obs_b.dtype).max,
-            dtype=node_obs_b.dtype,
-            device=self.device,
-        )
+        mask_h1 = local_mask_i.bool().clone()
         blockers = []
+        predictive_data = []
         neighbors = self._selected_neighbors(
-            i, {j: a for j, a in selected.items() if j != i},
-            ego_indices, adj_b[i]
+            i, selected, ego_indices, adj_b[i]
         )
         for distance, j, action_j in neighbors:
-            compat, margins = self.pairwise_compatibility(
-                node_obs_b[i], ego_indices[i], ego_indices[j], action_j
+            compat_h1, margin_h1 = self.multi_step_pairwise_margin_vector(
+                node_obs_b[i],
+                ego_indices[i],
+                ego_indices[j],
+                action_j,
+                horizon=1,
             )
-            previous_count = int(mask_i.sum().item())
-            next_mask = mask_i & compat
+            previous_count = int(mask_h1.sum().item())
+            next_mask = mask_h1 & compat_h1
             if int(next_mask.sum().item()) < previous_count:
-                blockers.append((float(margins.max().item()), distance, j))
-            mask_i = next_mask
-            combined_margin = torch.minimum(combined_margin, margins)
-        return mask_i, combined_margin, blockers, len(neighbors)
+                blockers.append((float(margin_h1.max().item()), distance, j))
+            mask_h1 = next_mask
 
-    def _top_actions(self, logits_i, local_mask_i, required_action=None):
-        candidates = torch.nonzero(local_mask_i, as_tuple=False).flatten()
+            compat_hh, margin_hh = self.multi_step_pairwise_margin_vector(
+                node_obs_b[i],
+                ego_indices[i],
+                ego_indices[j],
+                action_j,
+                horizon=self.horizon,
+            )
+            predictive_data.append(
+                {
+                    "neighbor": j,
+                    "compat": compat_hh,
+                    "margin": margin_hh,
+                    "risk": -float(margin_hh.max().item()),
+                }
+            )
+
+        mask_predictive = mask_h1.clone()
+        ranked = sorted(
+            predictive_data, key=lambda item: item["risk"], reverse=True
+        )
+        for item in ranked[: self.predictive_hard_neighbors]:
+            mask_predictive &= item["compat"]
+
+        predictive_applied = (
+            self.predictive_hard_neighbors > 0
+            and bool(predictive_data)
+            and int(mask_predictive.sum().item()) >= self.min_joint_domain_size
+        )
+        final_mask = mask_predictive if predictive_applied else mask_h1
+        predictive_relaxed = (
+            self.predictive_hard_neighbors > 0
+            and bool(predictive_data)
+            and not predictive_applied
+            and int(mask_predictive.sum().item()) < int(mask_h1.sum().item())
+        )
+
+        if predictive_data:
+            predictive_penalty = torch.stack(
+                [
+                    torch.relu(-item["margin"])
+                    for item in predictive_data
+                ]
+            ).max(dim=0).values
+        else:
+            predictive_penalty = torch.zeros_like(local_mask_i, dtype=torch.float32)
+        if not self.use_soft_predictive_penalty:
+            predictive_penalty.zero_()
+
+        return {
+            "mask": final_mask,
+            "mask_h1": mask_h1,
+            "mask_predictive": mask_predictive,
+            "penalty": predictive_penalty,
+            "blockers": blockers,
+            "edges": len(neighbors),
+            "predictive_applied": predictive_applied,
+            "predictive_relaxed": predictive_relaxed,
+        }
+
+    def _action_weights(self, mask, penalty):
+        weights = mask.to(dtype=penalty.dtype)
+        if self.use_soft_predictive_penalty:
+            log_weight = -self.predictive_soft_penalty_coef * penalty.float()
+            weights = weights * torch.exp(log_weight.clamp(min=-9.0))
+        return weights
+
+    def _adjusted_logits(self, logits_i, penalty):
+        if not self.use_soft_predictive_penalty:
+            return logits_i
+        return logits_i - self.predictive_soft_penalty_coef * penalty.to(
+            dtype=logits_i.dtype
+        )
+
+    def _top_actions(
+        self, logits_i, mask_i, penalty, required_action=None
+    ):
+        candidates = torch.nonzero(mask_i, as_tuple=False).flatten()
         if candidates.numel() == 0:
             candidates = torch.arange(logits_i.shape[0], device=self.device)
-        scores = logits_i[candidates]
+        adjusted = self._adjusted_logits(logits_i, penalty)
         top_count = min(self.repair_top_k, candidates.numel())
-        result = candidates[torch.topk(scores, top_count).indices].tolist()
+        result = candidates[
+            torch.topk(adjusted[candidates], top_count).indices
+        ].tolist()
         if required_action is not None and required_action not in result:
             result[-1] = int(required_action)
         return list(dict.fromkeys(int(action) for action in result))
@@ -257,10 +331,19 @@ class DecentralizedPriorityJointDTCBFShield:
 
         candidate_lists = []
         for agent in cluster:
+            state = self._constraint_state(
+                agent,
+                selected,
+                local_mask_b[agent],
+                node_obs_b,
+                adj_b,
+                ego_indices,
+            )
             candidate_lists.append(
                 self._top_actions(
                     logits_b[agent],
-                    local_mask_b[agent].bool(),
+                    state["mask_h1"],
+                    state["penalty"],
                     selected.get(agent),
                 )
             )
@@ -276,9 +359,9 @@ class DecentralizedPriorityJointDTCBFShield:
             trial = dict(outside)
             trial.update(dict(zip(cluster, action_tuple)))
             valid = True
-            min_margin = float("inf")
+            score = 0.0
             for agent, action in zip(cluster, action_tuple):
-                mask, margins, _, _ = self._conditional_mask(
+                state = self._constraint_state(
                     agent,
                     trial,
                     local_mask_b[agent],
@@ -286,25 +369,14 @@ class DecentralizedPriorityJointDTCBFShield:
                     adj_b,
                     ego_indices,
                 )
-                if not bool(mask[action]):
+                if not bool(state["mask_h1"][action]):
                     valid = False
                     break
-                if not torch.isinf(margins).all():
-                    min_margin = min(
-                        min_margin, float(margins[action].item())
-                    )
-            if not valid:
-                continue
-            logit_score = sum(
-                float(logits_b[agent, action].item())
-                for agent, action in zip(cluster, action_tuple)
-            )
-            margin_score = 0.0 if min_margin == float("inf") else min_margin
-            score = (
-                self.recovery_margin_coef * margin_score
-                + self.recovery_logit_coef * logit_score
-            )
-            if best_score is None or score > best_score:
+                adjusted = self._adjusted_logits(
+                    logits_b[agent], state["penalty"]
+                )
+                score += float(adjusted[action].item())
+            if valid and (best_score is None or score > best_score):
                 best_score = score
                 best_actions = dict(zip(cluster, action_tuple))
         return best_actions
@@ -320,65 +392,51 @@ class DecentralizedPriorityJointDTCBFShield:
         ego_indices,
         num_agents,
     ):
-        _, margins, _, _ = self._conditional_mask(
-            i, selected, torch.ones_like(local_mask_i),
-            node_obs_b, adj_b, ego_indices
+        state = self._constraint_state(
+            i,
+            selected,
+            torch.ones_like(local_mask_i),
+            node_obs_b,
+            adj_b,
+            ego_indices,
         )
-        finite_pairwise = ~torch.isinf(margins)
-        if not finite_pairwise.any():
-            margins = torch.zeros_like(logits_i)
-        policy_scores = torch.log_softmax(logits_i.float(), dim=-1)
+        immediate_margins = []
+        for _, j, action_j in self._selected_neighbors(
+            i, selected, ego_indices, adj_b[i]
+        ):
+            _, margin_h1 = self.multi_step_pairwise_margin_vector(
+                node_obs_b[i],
+                ego_indices[i],
+                ego_indices[j],
+                action_j,
+                horizon=1,
+            )
+            immediate_margins.append(margin_h1)
+        if immediate_margins:
+            min_margin = torch.stack(immediate_margins).min(dim=0).values
+        else:
+            min_margin = torch.zeros_like(logits_i)
+
+        adjusted_logits = self._adjusted_logits(logits_i, state["penalty"])
+        policy_scores = torch.log_softmax(adjusted_logits.float(), dim=-1)
         goal_direction = self._goal_direction(
             node_obs_b[i], ego_indices[i], i, num_agents
         )
         progress = (self.action_table * goal_direction[None]).sum(-1)
         score = (
-            self.recovery_margin_coef * margins.float()
+            self.recovery_margin_coef * min_margin.float()
             + self.recovery_logit_coef * policy_scores
             + self.recovery_progress_coef * progress.float()
         )
         if local_mask_i.any():
             score = score.masked_fill(~local_mask_i.bool(), -torch.inf)
-        return int(score.argmax().item()), float(margins.max().item())
+        return int(score.argmax().item()), state
 
-    def _finalize_distributions(
-        self,
-        selected,
-        logits_b,
-        decision_masks,
-        certified,
-    ):
-        num_agents, action_count = logits_b.shape
-        actions = torch.zeros(
-            num_agents, 1, dtype=torch.long, device=self.device
-        )
-        log_probs = torch.zeros(
-            num_agents, 1, dtype=logits_b.dtype, device=self.device
-        )
-        final_masks = torch.zeros(
-            num_agents, action_count, dtype=torch.bool, device=self.device
-        )
-        for i in range(num_agents):
-            action_i = int(selected[i])
-            mask_i = decision_masks[i].clone()
-            if not bool(mask_i[action_i]):
-                mask_i.zero_()
-                mask_i[action_i] = True
-                certified[i] = False
-            final_masks[i] = mask_i
-            masked_logits = logits_b[i].masked_fill(
-                ~mask_i, categorical_mask_value(logits_b[i])
-            )
-            dist = FixedCategorical(logits=masked_logits[None])
-            action = torch.tensor([[action_i]], device=self.device)
-            actions[i] = action[0]
-            log_probs[i] = dist.log_probs(action)[0]
-        return actions, log_probs, final_masks
-
-    def _audit_selected_actions(
-        self, selected, node_obs_b, adj_b, ego_indices, certified
+    def _audit_immediate_safety(
+        self, selected, node_obs_b, adj_b, ego_indices
     ):
         agents = sorted(selected)
+        unsafe = set()
         for offset, i in enumerate(agents):
             for j in agents[offset + 1:]:
                 distance = float(
@@ -386,15 +444,16 @@ class DecentralizedPriorityJointDTCBFShield:
                 )
                 if distance <= 0.0 or distance > self.max_edge_dist:
                     continue
-                compat, _ = self.pairwise_compatibility(
+                compat_h1, _ = self.multi_step_pairwise_margin_vector(
                     node_obs_b[i],
                     ego_indices[i],
                     ego_indices[j],
                     selected[j],
+                    horizon=1,
                 )
-                if not bool(compat[selected[i]]):
-                    certified[i] = False
-                    certified[j] = False
+                if not bool(compat_h1[selected[i]]):
+                    unsafe.update((i, j))
+        return unsafe
 
     def sample(
         self, logits, local_mask, node_obs, adj, agent_id, deterministic=False
@@ -406,19 +465,21 @@ class DecentralizedPriorityJointDTCBFShield:
         log_probs = torch.zeros(
             batch_size, num_agents, 1, dtype=logits.dtype, device=self.device
         )
-        final_masks = torch.zeros(
-            batch_size, num_agents, action_count,
-            dtype=torch.bool, device=self.device
+        action_weights = torch.zeros(
+            batch_size,
+            num_agents,
+            action_count,
+            dtype=logits.dtype,
+            device=self.device,
         )
         local_safe = local_mask.float().mean().item()
         final_domain_sizes: List[int] = []
-        pairwise_minima: List[float] = []
         no_joint_safe = 0
         recovery_used = 0
         repair_attempts = 0
         repair_successes = 0
-        uncertified_actions = 0
-        pairwise_edges = 0
+        predictive_applied = 0
+        predictive_relaxed = 0
 
         for b in range(batch_size):
             ego_indices = [
@@ -427,8 +488,10 @@ class DecentralizedPriorityJointDTCBFShield:
             priorities = [
                 (
                     self._priority(
-                        node_obs[b, i], adj[b, i],
-                        ego_indices[i], ego_indices[i]
+                        node_obs[b, i],
+                        adj[b, i],
+                        ego_indices[i],
+                        ego_indices[i],
                     ),
                     ego_indices[i],
                     i,
@@ -437,35 +500,43 @@ class DecentralizedPriorityJointDTCBFShield:
             ]
             order = [item[2] for item in sorted(priorities)]
             selected: Dict[int, int] = {}
-            decision_masks: Dict[int, torch.Tensor] = {}
-            certified = {i: True for i in range(num_agents)}
+            decision_weights: Dict[int, torch.Tensor] = {}
 
             for i in order:
-                mask_i, margins, blockers, edges = self._conditional_mask(
-                    i, selected, local_mask[b, i],
-                    node_obs[b], adj[b], ego_indices
+                state = self._constraint_state(
+                    i,
+                    selected,
+                    local_mask[b, i],
+                    node_obs[b],
+                    adj[b],
+                    ego_indices,
                 )
-                pairwise_edges += edges
-                if not torch.isinf(margins).all():
-                    pairwise_minima.append(float(margins.min().item()))
+                predictive_applied += int(state["predictive_applied"])
+                predictive_relaxed += int(state["predictive_relaxed"])
 
-                if not mask_i.any():
+                if not state["mask"].any():
                     no_joint_safe += 1
                     repaired = None
                     if (
                         self.use_joint_repair
                         and local_mask[b, i].any()
-                        and blockers
+                        and state["blockers"]
                     ):
                         repair_attempts += 1
                         repaired = self._repair_cluster(
-                            i, blockers, selected, logits[b], local_mask[b],
-                            node_obs[b], adj[b], ego_indices
+                            i,
+                            state["blockers"],
+                            selected,
+                            logits[b],
+                            local_mask[b],
+                            node_obs[b],
+                            adj[b],
+                            ego_indices,
                         )
                     if repaired is not None:
                         selected.update(repaired)
                         for repaired_agent in repaired:
-                            repaired_mask, _, _, _ = self._conditional_mask(
+                            repaired_state = self._constraint_state(
                                 repaired_agent,
                                 selected,
                                 local_mask[b, repaired_agent],
@@ -473,50 +544,75 @@ class DecentralizedPriorityJointDTCBFShield:
                                 adj[b],
                                 ego_indices,
                             )
-                            decision_masks[repaired_agent] = repaired_mask
+                            decision_weights[repaired_agent] = (
+                                self._action_weights(
+                                    repaired_state["mask"],
+                                    repaired_state["penalty"],
+                                )
+                            )
                         repair_successes += 1
                         continue
-                    if self.no_safe_action_strategy == "terminate":
-                        raise RuntimeError(
-                            "Joint DTCBF shield found no feasible action."
-                        )
-                    recovery, recovery_margin = self._maxmin_recovery(
-                        i, selected, logits[b, i], local_mask[b, i],
-                        node_obs[b], adj[b], ego_indices, num_agents
+
+                    recovery, recovery_state = self._maxmin_recovery(
+                        i,
+                        selected,
+                        logits[b, i],
+                        local_mask[b, i],
+                        node_obs[b],
+                        adj[b],
+                        ego_indices,
+                        num_agents,
                     )
                     selected[i] = recovery
-                    recovery_mask = torch.zeros_like(local_mask[b, i])
-                    recovery_mask[recovery] = True
-                    decision_masks[i] = recovery_mask
-                    certified[i] = False
+                    weights = torch.zeros_like(logits[b, i])
+                    weights[recovery] = 1.0
+                    decision_weights[i] = weights
                     recovery_used += 1
-                    pairwise_minima.append(recovery_margin)
                     continue
 
-                masked_logits = logits[b, i].masked_fill(
-                    ~mask_i, categorical_mask_value(logits[b, i])
+                weights = self._action_weights(
+                    state["mask"], state["penalty"]
+                ).to(dtype=logits.dtype)
+                adjusted_logits = logits[b, i] + torch.log(
+                    weights.clamp_min(1e-4)
                 )
-                dist = FixedCategorical(logits=masked_logits[None])
+                adjusted_logits = adjusted_logits.masked_fill(
+                    ~state["mask"], categorical_mask_value(adjusted_logits)
+                )
+                dist = FixedCategorical(logits=adjusted_logits[None])
                 action = dist.mode() if deterministic else dist.sample()
                 selected[i] = int(action.item())
-                decision_masks[i] = mask_i
+                decision_weights[i] = weights
 
-            self._audit_selected_actions(
-                selected, node_obs[b], adj[b], ego_indices, certified
+            unsafe_agents = self._audit_immediate_safety(
+                selected, node_obs[b], adj[b], ego_indices
             )
-            actions[b], log_probs[b], final_masks[b] = (
-                self._finalize_distributions(
-                    selected, logits[b], decision_masks, certified
+            for i in range(num_agents):
+                action_i = int(selected[i])
+                weights_i = decision_weights[i].clone()
+                if i in unsafe_agents or weights_i[action_i] <= 0:
+                    weights_i.zero_()
+                    weights_i[action_i] = 1.0
+                action_weights[b, i] = weights_i
+                adjusted_logits = logits[b, i] + torch.log(
+                    weights_i.clamp_min(1e-4)
                 )
-            )
-            uncertified_actions += sum(not value for value in certified.values())
-            final_domain_sizes.extend(
-                final_masks[b].sum(dim=-1).cpu().tolist()
-            )
+                adjusted_logits = adjusted_logits.masked_fill(
+                    weights_i <= 0, categorical_mask_value(adjusted_logits)
+                )
+                dist = FixedCategorical(logits=adjusted_logits[None])
+                action = torch.tensor([[action_i]], device=self.device)
+                actions[b, i] = action[0]
+                log_probs[b, i] = dist.log_probs(action)[0]
+                final_domain_sizes.append(
+                    int((weights_i > 0).sum().item())
+                )
 
         stats: Dict[str, float] = {
             "local_safe_action_ratio": local_safe,
-            "joint_safe_action_ratio": float(final_masks.float().mean().item()),
+            "joint_safe_action_ratio": float(
+                (action_weights > 0).float().mean().item()
+            ),
             "avg_final_domain_size": float(
                 sum(final_domain_sizes) / max(len(final_domain_sizes), 1)
             ),
@@ -526,16 +622,9 @@ class DecentralizedPriorityJointDTCBFShield:
             "num_no_joint_safe_action": float(no_joint_safe),
             "num_recovery_used": float(recovery_used),
             "num_backup_used": float(recovery_used),
-            "num_least_unsafe_used": 0.0,
-            "num_uncertified_actions": float(uncertified_actions),
             "num_joint_repair_attempts": float(repair_attempts),
             "num_joint_repair_successes": float(repair_successes),
-            "joint_repair_success_rate": float(
-                repair_successes / max(repair_attempts, 1)
-            ),
-            "min_pairwise_dtcbf_margin": float(
-                min(pairwise_minima) if pairwise_minima else 0.0
-            ),
-            "num_pairwise_edges": float(pairwise_edges),
+            "predictive_hard_applied_count": float(predictive_applied),
+            "predictive_hard_relaxed_count": float(predictive_relaxed),
         }
-        return actions, log_probs, final_masks, stats
+        return actions, log_probs, action_weights, stats

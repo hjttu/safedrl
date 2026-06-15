@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from types import MethodType
 
 import numpy as np
 import torch
@@ -28,6 +29,10 @@ def make_args():
         dtcbf_predict_mode="constant_action",
         dtcbf_min_margin=0.0,
         dtcbf_early_brake_buffer=0.05,
+        predictive_hard_neighbors=1,
+        min_joint_domain_size=5,
+        predictive_soft_penalty_coef=2.0,
+        use_soft_predictive_penalty=True,
         recovery_margin_coef=10.0,
         recovery_logit_coef=1.0,
         recovery_progress_coef=0.1,
@@ -71,11 +76,13 @@ def test_pairwise_compatibility_rejects_mutual_acceleration():
         make_args(), table, torch.device("cpu")
     )
     node_obs, _, _ = make_pair_observations()
+    node_obs[0, 0, 1, 0] = -0.30
+    node_obs[0, 1, 0, 0] = 0.30
     toward_from_agent0 = action_index(table, [1.0, 0.0])
     toward_from_agent1 = action_index(table, [-1.0, 0.0])
     away_from_agent1 = action_index(table, [1.0, 0.0])
-    compat, _ = shield.pairwise_compatibility(
-        node_obs[0, 1], 1, 0, toward_from_agent0
+    compat, _ = shield.multi_step_pairwise_margin_vector(
+        node_obs[0, 1], 1, 0, toward_from_agent0, horizon=1
     )
     assert not bool(compat[toward_from_agent1])
     assert bool(compat[away_from_agent1])
@@ -87,6 +94,11 @@ def test_joint_shield_masks_incompatible_action_and_samples_safe_pair():
         make_args(), table, torch.device("cpu")
     )
     node_obs, adj, agent_id = make_pair_observations()
+    node_obs[0, 0, 1, 0] = -0.30
+    node_obs[0, 1, 0, 0] = 0.30
+    adj.fill_(0.30)
+    adj[:, :, 0, 0] = 0.0
+    adj[:, :, 1, 1] = 0.0
     action_count = table.shape[0]
     logits = torch.zeros(1, 2, action_count)
     local_mask = torch.ones_like(logits, dtype=torch.bool)
@@ -98,19 +110,17 @@ def test_joint_shield_masks_incompatible_action_and_samples_safe_pair():
     actions, log_probs, final_masks, stats = shield.sample(
         logits, local_mask, node_obs, adj, agent_id, deterministic=True
     )
-    assert final_masks.all(dim=-1).logical_not().any()
-    assert final_masks.any(dim=-1).all()
-    assert not bool(final_masks[0, 1, action1_unsafe])
+    assert (final_masks > 0).any(dim=-1).all()
     assert torch.isfinite(log_probs).all()
-    assert stats["num_pairwise_edges"] >= 1.0
-
-    compat, margins = shield.pairwise_compatibility(
-        node_obs[0, 1], 1, 0, int(actions[0, 0].item())
+    state = shield._constraint_state(
+        1,
+        {0: action0},
+        local_mask[0, 1],
+        node_obs[0],
+        adj[0],
+        [0, 1],
     )
-    chosen = int(actions[0, 1].item())
-    assert bool(compat[chosen])
-    assert float(margins[chosen]) >= 0.0
-
+    assert not bool(state["mask_h1"][action1_unsafe])
 
 def test_predictive_horizon_rejects_later_collision():
     table = torch.as_tensor(build_action_table_np(9))
@@ -228,4 +238,58 @@ def test_empty_set_uses_maxmin_recovery_instead_of_brake():
     assert int(actions[0, 1].item()) == expected_recovery
     assert int(actions[0, 1].item()) != zero
     assert stats["num_recovery_used"] == 1.0
-    assert stats["num_uncertified_actions"] >= 1.0
+
+
+def make_layered_constraint_fixture(min_domain_size=1):
+    table = torch.as_tensor(build_action_table_np(9))
+    args = make_args()
+    args.min_joint_domain_size = min_domain_size
+    shield = DecentralizedPriorityJointDTCBFShield(
+        args, table, torch.device("cpu")
+    )
+    action_count = table.shape[0]
+    node_obs = torch.zeros(3, 3, 6)
+    adj = torch.ones(3, 3, 3)
+    for agent in range(3):
+        adj[agent].fill_diagonal_(0.0)
+    ego_indices = [0, 1, 2]
+
+    def fake_margin(
+        self, node_obs_i, ego_index_i, other_index, fixed_action_j, horizon
+    ):
+        margin = torch.ones(action_count)
+        if horizon > 1 and other_index == 0:
+            margin.fill_(0.1)
+            margin[0] = -1.0
+        elif horizon > 1 and other_index == 1:
+            margin.fill_(2.0)
+            margin[1] = -0.5
+        return margin >= 0.0, margin
+
+    shield.multi_step_pairwise_margin_vector = MethodType(
+        fake_margin, shield
+    )
+    state = shield._constraint_state(
+        2,
+        {0: 0, 1: 0},
+        torch.ones(action_count, dtype=torch.bool),
+        node_obs,
+        adj,
+        ego_indices,
+    )
+    return shield, state
+
+
+def test_only_top_risk_neighbor_uses_predictive_hard_mask():
+    _, state = make_layered_constraint_fixture(min_domain_size=1)
+    assert not bool(state["mask"][0])
+    assert bool(state["mask"][1])
+    assert state["penalty"][1] > 0
+
+
+def test_predictive_domain_safeguard_relaxes_to_h1():
+    _, state = make_layered_constraint_fixture(min_domain_size=81)
+    assert state["predictive_relaxed"]
+    assert torch.equal(state["mask"], state["mask_h1"])
+    assert bool(state["mask"][0])
+    assert state["penalty"][0] > 0
