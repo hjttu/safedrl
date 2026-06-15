@@ -13,7 +13,7 @@ for seed in $(seq "${seed_max}"); do
     echo "seed: ${seed}"
     CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
     PYTHONUNBUFFERED=1 \
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    PYTORCH_ALLOC_CONF=expandable_segments:True \
     python ../onpolicy/scripts/train_mpe.py \
         --use_valuenorm --use_popart \
         --project_name "GS_GP_laptop" \
@@ -28,6 +28,15 @@ for seed in $(seq "${seed_max}"); do
         --use_joint_dtcbf_shield "True" \
         --joint_shield_mode "decentralized_priority" \
         --cbf_max_accel 0.5 --cbf_max_speed 1.0 \
+        --cbf_alpha 0.3 \
+        --dtcbf_horizon 3 \
+        --dtcbf_predict_mode "constant_action" \
+        --dtcbf_min_margin 0.0 \
+        --dtcbf_early_brake_buffer 0.05 \
+        --use_joint_repair "True" \
+        --joint_repair_top_k 8 \
+        --joint_repair_max_cluster_size 4 \
+        --joint_repair_include_blockers "True" \
         --no_safe_action_strategy "backup" \
         --backup_action_mode "brake" \
         --clip_param 0.2 --gamma 0.99 \

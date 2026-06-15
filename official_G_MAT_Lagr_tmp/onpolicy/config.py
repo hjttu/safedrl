@@ -292,6 +292,22 @@ def get_config():
     parser.add_argument("--max_shield_neighbors", type=int, default=8)
     parser.add_argument("--priority_metric", type=str, default="min_h",
                         choices=["min_h", "ttc", "agent_id", "risk_score"])
+    parser.add_argument("--dtcbf_horizon", type=int, default=3)
+    parser.add_argument("--dtcbf_predict_mode", type=str, default="constant_action",
+                        choices=["constant_action"])
+    parser.add_argument("--dtcbf_min_margin", type=float, default=0.0)
+    parser.add_argument("--dtcbf_early_brake_buffer", type=float, default=0.05)
+    parser.add_argument("--recovery_margin_coef", type=float, default=10.0)
+    parser.add_argument("--recovery_logit_coef", type=float, default=1.0)
+    parser.add_argument("--recovery_progress_coef", type=float, default=0.1)
+    parser.add_argument("--use_joint_repair", type=lambda x: bool(strtobool(x)), default=True)
+    parser.add_argument("--joint_repair_top_k", type=int, default=8)
+    parser.add_argument("--joint_repair_max_cluster_size", type=int, default=4)
+    parser.add_argument("--joint_repair_objective", type=str,
+                        default="max_sum_logprob_with_margin",
+                        choices=["max_sum_logprob_with_margin"])
+    parser.add_argument("--joint_repair_include_blockers",
+                        type=lambda x: bool(strtobool(x)), default=True)
     parser.add_argument("--log_shield_stats", type=lambda x: bool(strtobool(x)), default=True)
 
     # curriculum learning parameters
