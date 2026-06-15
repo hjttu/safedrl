@@ -18,19 +18,21 @@ def make_args():
     return args
 
 
-def make_actor():
+def make_actor(action_grid_size=21, use_joint=False):
     args = make_args()
+    args.action_grid_size = action_grid_size
+    args.use_joint_dtcbf_shield = use_joint
     return GR_Actor(
         args,
         gym.spaces.Box(-np.inf, np.inf, shape=(6,), dtype=np.float32),
         gym.spaces.Box(-np.inf, np.inf, shape=(4, 6), dtype=np.float32),
         gym.spaces.Box(-np.inf, np.inf, shape=(1,), dtype=np.float32),
-        gym.spaces.Discrete(400),
+        gym.spaces.Discrete(action_grid_size ** 2),
     )
 
 
 def test_hard_mask_and_safe_guide_projection():
-    actor = make_actor()
+    actor = make_actor(21)
     obs = torch.tensor([[0.0, 0.0, 0.0, 0.0, 1.0, 0.0]])
     node_obs = torch.tensor(
         [[
@@ -48,7 +50,7 @@ def test_hard_mask_and_safe_guide_projection():
     )
     agent_id = torch.tensor([[0]])
 
-    margins, hard_mask, _ = actor._cbf_action_features(
+    margins, hard_mask, _ = actor._local_dtcbf_action_features(
         obs, node_obs, adj, agent_id
     )
     assert hard_mask.any()
@@ -56,10 +58,18 @@ def test_hard_mask_and_safe_guide_projection():
     guide_action = actor._safe_guide_actions(obs, hard_mask)
     assert hard_mask.gather(1, guide_action).all()
     assert torch.all(margins[hard_mask] >= 0.0)
+    toward = (
+        actor.action_table - torch.tensor([1.0, 0.0])
+    ).square().sum(-1).argmin()
+    away = (
+        actor.action_table - torch.tensor([-1.0, 0.0])
+    ).square().sum(-1).argmin()
+    assert not bool(hard_mask[0, toward])
+    assert bool(hard_mask[0, away])
 
 
 def test_unsafe_actions_receive_zero_probability():
-    actor = make_actor()
+    actor = make_actor(21)
     batch = 1
     obs = torch.tensor([[0.0, 0.0, 0.0, 0.0, 1.0, 0.0]])
     node_obs = torch.tensor(
@@ -87,3 +97,37 @@ def test_unsafe_actions_receive_zero_probability():
     loss = safety_score.square().mean()
     loss.backward()
     assert actor.graph_cbf_head[-1].weight.grad is not None
+
+
+def test_final_mask_reproduces_rollout_log_probability():
+    actor = make_actor(9, use_joint=True)
+    obs = torch.tensor([[0.0, 0.0, 0.0, 0.0, 1.0, 0.0]])
+    node_obs = torch.tensor(
+        [[
+            [0.0, 0.0, 0.0, 0.0, 0.1, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.1, 2.0],
+            [1.0, 0.0, 0.0, 0.0, 0.1, 1.0],
+            [-1.0, 0.0, 0.0, 0.0, 0.1, 0.0],
+        ]]
+    )
+    adj = torch.tensor(
+        [[[0.0, 1.0, 1.0, 1.0],
+          [1.0, 0.0, 0.0, 0.0],
+          [1.0, 0.0, 0.0, 0.0],
+          [1.0, 0.0, 0.0, 0.0]]]
+    )
+    agent_id = torch.tensor([[0]])
+    rnn_states = torch.zeros(1, actor._recurrent_N, actor.hidden_size)
+    masks = torch.ones(1, 1)
+    final_mask = torch.zeros(1, actor.action_table.shape[0])
+    final_mask[:, [0, 10, 20]] = 1.0
+
+    actions, rollout_log_probs, _ = actor.forward(
+        obs, node_obs, adj, agent_id, rnn_states, masks,
+        available_actions=final_mask, deterministic=True
+    )
+    update_log_probs, _, _, _ = actor.evaluate_actions(
+        obs, node_obs, adj, agent_id, rnn_states, actions, masks,
+        available_actions=final_mask
+    )
+    assert torch.allclose(rollout_log_probs, update_log_probs, atol=1e-6)

@@ -1,5 +1,6 @@
 import argparse
 import math
+import warnings
 from typing import Tuple, List
 
 import gym
@@ -16,6 +17,7 @@ from onpolicy.algorithms.utils.act import ACTLayer
 from onpolicy.algorithms.utils.distributions import FixedCategorical
 from onpolicy.algorithms.utils.popart import PopArt
 from onpolicy.utils.util import get_shape_from_obs_space
+from multiagent.action_table import build_action_table_np
 
 
 def minibatchGenerator(obs: Tensor, node_obs: Tensor, adj: Tensor, agent_id: Tensor, max_batch_size: int):
@@ -83,10 +85,19 @@ class GR_Actor(nn.Module):
             args.use_graph_cbf_shield
             and action_space.__class__.__name__ == "Discrete"
         )
+        self.use_local_dtcbf_shield = args.use_local_dtcbf_shield
+        self.use_joint_dtcbf_shield = args.use_joint_dtcbf_shield
         self.cbf_alpha = args.cbf_alpha
         self.cbf_dt = args.cbf_dt
+        self.cbf_max_accel = args.cbf_max_accel
+        self.cbf_max_speed = args.cbf_max_speed
+        self.cbf_horizon = args.cbf_horizon
+        self.cbf_include_obstacles = args.cbf_include_obstacles
+        self.cbf_include_agents_in_local_mask = args.cbf_include_agents_in_local_mask
         self.cbf_safety_buffer = args.cbf_safety_buffer
         self.safety_score_coef = args.safety_score_coef
+        self.no_safe_action_strategy = args.no_safe_action_strategy
+        self.backup_action_mode = args.backup_action_mode
         self.guide_decay_steepness = args.guide_decay_steepness
         self.guide_weight = 1.0
         self.graph_feat_type = args.graph_feat_type
@@ -127,8 +138,13 @@ class GR_Actor(nn.Module):
             action_side = int(round(math.sqrt(action_space.n)))
             if action_side * action_side != action_space.n:
                 raise ValueError("Graph-CBF shield requires a square 2-D action table")
-            action_axis = torch.linspace(-1.0, 1.0, action_side)
-            action_table = torch.cartesian_prod(action_axis, action_axis)
+            if action_side % 2 == 0:
+                warnings.warn(
+                    "Even action_grid_size has no exact zero action; an odd grid "
+                    "is recommended for DTCBF backup control.",
+                    RuntimeWarning,
+                )
+            action_table = torch.as_tensor(build_action_table_np(action_side))
             self.register_buffer("action_table", action_table)
             self.action_encoder = nn.Sequential(
                 nn.Linear(2, self.hidden_size),
@@ -149,8 +165,8 @@ class GR_Actor(nn.Module):
             1.0 + math.exp(self.guide_decay_steepness * (progress - 0.5))
         )
 
-    def _cbf_action_features(self, obs, node_obs, adj, agent_id):
-        """Build analytical DTCBF margins and four compact risk features."""
+    def _local_dtcbf_action_features(self, obs, node_obs, adj, agent_id):
+        """Build one-step local DTCBF masks using the environment dynamics."""
         batch_size, num_nodes, _ = node_obs.shape
         action_count = self.action_table.shape[0]
         ego_index = agent_id.long().view(batch_size, -1)[:, 0]
@@ -187,18 +203,61 @@ class GR_Actor(nn.Module):
             torch.arange(num_nodes, device=node_obs.device)[None, :]
             != ego_index[:, None]
         )
-        constraint_mask = connected & not_self & (entity_type != 1)
+        obstacle_mask = (entity_type == 2) | (entity_type == 3)
+        agent_mask = entity_type == 0
+        constrained_types = torch.zeros_like(entity_type, dtype=torch.bool)
+        if self.cbf_include_obstacles:
+            constrained_types |= obstacle_mask
+        if self.cbf_include_agents_in_local_mask:
+            constrained_types |= agent_mask
+        constraint_mask = connected & not_self & constrained_types
 
         clearance = ego_radius[:, None] + entity_radius + self.cbf_safety_buffer
-        h = (rel_pos.square().sum(-1) - clearance.square())
-        next_rel_vel = (
-            rel_vel[:, None, :, :]
-            + self.cbf_dt * self.action_table[None, :, None, :]
+        h_now = rel_pos.square().sum(-1) - clearance.square()
+        acceleration = self.action_table * self.cbf_max_accel
+        ego_velocity = obs[:, 2:4]
+        entity_velocity = ego_velocity[:, None] - rel_vel
+        predicted_ego_velocity = ego_velocity[:, None].expand(
+            -1, action_count, -1
         )
-        margins = (
-            2.0 * (rel_pos[:, None] * next_rel_vel).sum(-1)
-            + self.cbf_alpha * h[:, None]
+        predicted_rel_pos = rel_pos[:, None].expand(
+            -1, action_count, -1, -1
         )
+        predicted_h = h_now[:, None].expand(-1, action_count, -1)
+        horizon_margins = []
+        for _ in range(max(int(self.cbf_horizon), 1)):
+            next_ego_velocity = (
+                predicted_ego_velocity + self.cbf_dt * acceleration[None]
+            )
+            speed = next_ego_velocity.norm(dim=-1, keepdim=True)
+            speed_scale = torch.clamp(
+                self.cbf_max_speed / speed.clamp_min(1e-8), max=1.0
+            )
+            next_ego_velocity = next_ego_velocity * speed_scale
+            effective_acceleration = (
+                next_ego_velocity - predicted_ego_velocity
+            ) / self.cbf_dt
+            predicted_rel_velocity = (
+                predicted_ego_velocity[:, :, None]
+                - entity_velocity[:, None]
+            )
+            next_rel_pos = (
+                predicted_rel_pos
+                + self.cbf_dt * predicted_rel_velocity
+                + 0.5
+                * self.cbf_dt ** 2
+                * effective_acceleration[:, :, None]
+            )
+            h_next = (
+                next_rel_pos.square().sum(-1) - clearance[:, None].square()
+            )
+            horizon_margins.append(
+                h_next - (1.0 - self.cbf_alpha) * predicted_h
+            )
+            predicted_ego_velocity = next_ego_velocity
+            predicted_rel_pos = next_rel_pos
+            predicted_h = h_next
+        margins = torch.stack(horizon_margins).min(dim=0).values
         inf = torch.finfo(margins.dtype).max
         masked_margins = margins.masked_fill(~constraint_mask[:, None], inf)
         min_margin = masked_margins.min(dim=-1).values
@@ -206,24 +265,16 @@ class GR_Actor(nn.Module):
         min_margin[no_constraints] = 1.0
 
         hard_mask = min_margin >= 0.0
-        # Keep the distribution defined in an infeasible state by retaining
-        # only the analytically least-unsafe action.
-        no_safe_action = ~hard_mask.any(dim=-1)
-        if no_safe_action.any():
-            fallback = min_margin.argmax(dim=-1)
-            hard_mask[no_safe_action] = False
-            hard_mask[no_safe_action, fallback[no_safe_action]] = True
-
-        h_min = h.masked_fill(~constraint_mask, inf).min(dim=-1).values
+        if not self.use_local_dtcbf_shield:
+            hard_mask = torch.ones_like(hard_mask)
+        h_min = h_now.masked_fill(~constraint_mask, inf).min(dim=-1).values
         h_min[no_constraints] = 1.0
-        agent_mask = constraint_mask & (entity_type == 0)
-        obstacle_mask = constraint_mask & (entity_type != 0)
         violations = torch.relu(-margins)
         neighbor_risk = violations.masked_fill(
-            ~agent_mask[:, None], 0.0
+            ~(constraint_mask & agent_mask)[:, None], 0.0
         ).max(dim=-1).values
         obstacle_risk = violations.masked_fill(
-            ~obstacle_mask[:, None], 0.0
+            ~(constraint_mask & obstacle_mask)[:, None], 0.0
         ).max(dim=-1).values
 
         cbf_features = torch.stack(
@@ -237,12 +288,43 @@ class GR_Actor(nn.Module):
         )
         return min_margin, hard_mask, cbf_features
 
+    def _cbf_action_features(self, obs, node_obs, adj, agent_id):
+        """Backward-compatible alias for the local discrete-time CBF."""
+        return self._local_dtcbf_action_features(obs, node_obs, adj, agent_id)
+
+    def _backup_action_indices(self, obs):
+        if self.backup_action_mode == "zero":
+            target = torch.zeros_like(obs[:, 2:4])
+        else:
+            target = torch.clamp(
+                -obs[:, 2:4] / max(self.cbf_max_accel * self.cbf_dt, 1e-8),
+                -1.0,
+                1.0,
+            )
+        distances = (self.action_table[None] - target[:, None]).square().sum(-1)
+        return distances.argmin(dim=-1)
+
+    def _make_nonempty_mask(self, mask, margins, obs):
+        resolved = mask.clone()
+        infeasible = ~resolved.any(dim=-1)
+        if not infeasible.any():
+            return resolved
+        if self.no_safe_action_strategy == "terminate":
+            raise RuntimeError("Local DTCBF shield found no feasible action.")
+        if self.no_safe_action_strategy == "least_unsafe":
+            fallback = margins.argmax(dim=-1)
+        else:
+            fallback = self._backup_action_indices(obs)
+        resolved[infeasible] = False
+        resolved[infeasible, fallback[infeasible]] = True
+        return resolved
+
     def _shielded_distribution(
         self, actor_features, graph_emb, obs, node_obs, adj, agent_id,
         available_actions=None,
     ):
         base_logits = self.act.action_out.linear(actor_features)
-        margins, hard_mask, cbf_features = self._cbf_action_features(
+        margins, hard_mask, cbf_features = self._local_dtcbf_action_features(
             obs, node_obs, adj, agent_id
         )
         batch_size, action_count = margins.shape
@@ -251,15 +333,71 @@ class GR_Actor(nn.Module):
         graph_context = graph_emb[:, None].expand(-1, action_count, -1)
         safety_input = torch.cat([graph_context, action_emb, cbf_features], dim=-1)
         safety_score = self.graph_cbf_head(safety_input).squeeze(-1)
-        final_mask = hard_mask
-        if available_actions is not None:
-            final_mask = final_mask & available_actions.bool()
-            no_available_safe = ~final_mask.any(dim=-1)
-            if no_available_safe.any():
-                final_mask[no_available_safe] = hard_mask[no_available_safe]
+        if self.use_joint_dtcbf_shield and available_actions is not None:
+            final_mask = available_actions.bool()
+        else:
+            final_mask = hard_mask
+            if available_actions is not None:
+                final_mask = final_mask & available_actions.bool()
+            final_mask = self._make_nonempty_mask(final_mask, margins, obs)
         logits = base_logits + self.safety_score_coef * safety_score
         logits = logits.masked_fill(~final_mask, torch.finfo(logits.dtype).min)
         return FixedCategorical(logits=logits), margins, hard_mask, safety_score
+
+    def _extract_actor_features(
+        self, obs, node_obs, adj, agent_id, rnn_states, masks
+    ):
+        if self.split_batch and obs.shape[0] > self.max_batch_size:
+            actor_features = []
+            graph_embeddings = []
+            for batch in minibatchGenerator(
+                obs, node_obs, adj, agent_id, self.max_batch_size
+            ):
+                obs_batch, node_obs_batch, adj_batch, agent_id_batch = batch
+                if node_obs_batch.shape[0] > 0:
+                    graph_batch = self.gnn_base(
+                        node_obs_batch, adj_batch, agent_id_batch
+                    )
+                    actor_features.append(
+                        self.base(torch.cat([obs_batch, graph_batch], dim=1))
+                    )
+                    graph_embeddings.append(graph_batch)
+            actor_features = torch.cat(actor_features, dim=0)
+            graph_emb = torch.cat(graph_embeddings, dim=0)
+        else:
+            graph_emb = self.gnn_base(node_obs, adj, agent_id)
+            actor_features = self.base(torch.cat([obs, graph_emb], dim=1))
+        if self._use_naive_recurrent_policy or self._use_recurrent_policy:
+            actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
+        return actor_features, graph_emb, rnn_states
+
+    def get_logits_and_local_masks(
+        self, obs, node_obs, adj, agent_id, rnn_states, masks
+    ):
+        obs = check(obs).to(**self.tpdv)
+        node_obs = check(node_obs).to(**self.tpdv)
+        adj = check(adj).to(**self.tpdv)
+        agent_id = check(agent_id).to(**self.tpdv).long()
+        rnn_states = check(rnn_states).to(**self.tpdv)
+        masks = check(masks).to(**self.tpdv)
+        actor_features, graph_emb, rnn_states = self._extract_actor_features(
+            obs, node_obs, adj, agent_id, rnn_states, masks
+        )
+        base_logits = self.act.action_out.linear(actor_features)
+        margins, local_mask, cbf_features = self._local_dtcbf_action_features(
+            obs, node_obs, adj, agent_id
+        )
+        action_count = margins.shape[-1]
+        action_emb = self.action_encoder(self.action_table)[None].expand(
+            margins.shape[0], -1, -1
+        )
+        graph_context = graph_emb[:, None].expand(-1, action_count, -1)
+        safety_input = torch.cat(
+            [graph_context, action_emb, cbf_features], dim=-1
+        )
+        safety_score = self.graph_cbf_head(safety_input).squeeze(-1)
+        logits = base_logits + self.safety_score_coef * safety_score
+        return logits, local_mask, margins, safety_score, rnn_states
 
     def _safe_guide_actions(self, obs, hard_mask):
         goal_error = obs[:, 4:6]
@@ -317,32 +455,9 @@ class GR_Actor(nn.Module):
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
 
-        # if batch size is big, split into smaller batches, forward pass and then concatenate
-        if (self.split_batch) and (obs.shape[0] > self.max_batch_size):
-            # print(f'Actor obs: {obs.shape[0]}')
-            batchGenerator = minibatchGenerator(obs, node_obs, adj, agent_id, self.max_batch_size)
-            actor_features = []
-            graph_embeddings = []
-            for batch in batchGenerator:
-                obs_batch, node_obs_batch, adj_batch, agent_id_batch = batch
-                if node_obs_batch.shape[0] > 0:
-                    nbd_feats_batch = self.gnn_base(node_obs_batch, adj_batch, agent_id_batch)
-                    act_feats_batch = torch.cat([obs_batch, nbd_feats_batch], dim=1)
-                    actor_feats_batch = self.base(act_feats_batch)
-                    actor_features.append(actor_feats_batch)
-                    graph_embeddings.append(nbd_feats_batch)
-            actor_features = torch.cat(actor_features, dim=0)
-            graph_emb = torch.cat(graph_embeddings, dim=0)
-        else:
-            # print("node_obs: {}, adj:{}, id:{}".format(node_obs.shape, adj.shape, agent_id))  # (5,13,6)  (5,13,13)
-            nbd_features = self.gnn_base(node_obs, adj, agent_id)
-            graph_emb = nbd_features
-            actor_features = torch.cat([obs, nbd_features], dim=1)
-            actor_features = self.base(actor_features)
-
-        if self._use_naive_recurrent_policy or self._use_recurrent_policy:
-            # print("Actor: actor_features.shape: ", actor_features.shape)
-            actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
+        actor_features, graph_emb, rnn_states = self._extract_actor_features(
+            obs, node_obs, adj, agent_id, rnn_states, masks
+        )
 
         if self.use_graph_cbf_shield:
             dist, _, _, _ = self._shielded_distribution(
@@ -449,13 +564,27 @@ class GR_Actor(nn.Module):
                 ).sum() / active_masks.sum().clamp_min(1.0)
             else:
                 dist_entropy = entropy.mean()
-            guide_actions = self._safe_guide_actions(obs, hard_mask)
-            guide_loss = -dist.log_probs(guide_actions).mean()
-            safe_float = hard_mask.float()
-            margin_min = margins.masked_fill(~hard_mask, torch.finfo(margins.dtype).max).min(-1, keepdim=True).values
-            margin_max = margins.masked_fill(~hard_mask, torch.finfo(margins.dtype).min).max(-1, keepdim=True).values
+            local_loss_mask = self._make_nonempty_mask(hard_mask, margins, obs)
+            local_logits = (
+                self.act.action_out.linear(actor_features)
+                + self.safety_score_coef * safety_score
+            ).masked_fill(
+                ~local_loss_mask, torch.finfo(actor_features.dtype).min
+            )
+            local_dist = FixedCategorical(logits=local_logits)
+            guide_actions = self._safe_guide_actions(obs, local_loss_mask)
+            guide_loss = -local_dist.log_probs(guide_actions).mean()
+            safe_float = local_loss_mask.float()
+            margin_min = margins.masked_fill(
+                ~local_loss_mask, torch.finfo(margins.dtype).max
+            ).min(-1, keepdim=True).values
+            margin_max = margins.masked_fill(
+                ~local_loss_mask, torch.finfo(margins.dtype).min
+            ).max(-1, keepdim=True).values
             rank_target = (margins - margin_min) / (margin_max - margin_min).clamp_min(1e-6)
-            rank_target = torch.where(hard_mask, rank_target, torch.zeros_like(rank_target))
+            rank_target = torch.where(
+                local_loss_mask, rank_target, torch.zeros_like(rank_target)
+            )
             safety_rank_loss = (
                 (safety_score - rank_target).square() * safe_float
             ).sum() / safe_float.sum().clamp_min(1.0)

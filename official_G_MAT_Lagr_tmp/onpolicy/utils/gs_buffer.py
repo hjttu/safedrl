@@ -162,6 +162,15 @@ class GSReplayBuffer(object):
                 ),
                 dtype=np.float32,
             )
+            self.action_masks = np.ones(
+                (
+                    self.episode_length,
+                    self.n_rollout_threads,
+                    num_agents,
+                    act_space.n,
+                ),
+                dtype=np.float32,
+            )
         elif act_space.__class__.__name__ == "MultiDiscrete": # our MAS control
             self.available_actions = np.ones(
                 (
@@ -172,8 +181,10 @@ class GSReplayBuffer(object):
                 ),
                 dtype=np.float32,
             )
+            self.action_masks = None
         else:
             self.available_actions = None
+            self.action_masks = None
 
         act_shape = get_shape_from_act_space(act_space)
 
@@ -238,6 +249,7 @@ class GSReplayBuffer(object):
         costs: np.ndarray = None,
         cost_preds: np.ndarray = None,
         rnn_states_cost: np.ndarray = None,
+        action_masks: np.ndarray = None,
     ) -> None:
         """
         Insert data into the replay buffer, including safety-related data.
@@ -261,6 +273,8 @@ class GSReplayBuffer(object):
             self.active_masks[self.step + 1] = active_masks.copy()
         if available_actions is not None:
             self.available_actions[self.step + 1] = available_actions.copy()
+        if action_masks is not None and self.action_masks is not None:
+            self.action_masks[self.step] = action_masks.copy()
         if costs is not None:
             self.costs[self.step] = costs.copy()
         if cost_preds is not None:
@@ -592,9 +606,16 @@ class GSReplayBuffer(object):
             -1, *self.rnn_states_cost.shape[3:]
         )
         actions = self.actions.reshape(-1, self.actions.shape[-1])
-        if self.available_actions is not None:
-            available_actions = self.available_actions[:-1].reshape(
-                -1, self.available_actions.shape[-1]
+        action_mask_source = (
+            self.action_masks
+            if self.action_masks is not None
+            else self.available_actions[:-1]
+            if self.available_actions is not None
+            else None
+        )
+        if action_mask_source is not None:
+            available_actions = action_mask_source.reshape(
+                -1, action_mask_source.shape[-1]
             )
         value_preds = self.value_preds[:-1].reshape(-1, 1)
         returns = self.returns[:-1].reshape(-1, 1)
@@ -624,7 +645,7 @@ class GSReplayBuffer(object):
             rnn_states_critic_batch = rnn_states_critic[indices]
             rnn_states_cost_batch = rnn_states_cost[indices]
             actions_batch = actions[indices]
-            if self.available_actions is not None:
+            if action_mask_source is not None:
                 available_actions_batch = available_actions[indices]
             else:
                 available_actions_batch = None
@@ -739,9 +760,16 @@ class GSReplayBuffer(object):
             -1, batch_size, *self.rnn_states_cost.shape[3:]
         )
         actions = self.actions.reshape(-1, batch_size, self.actions.shape[-1])
-        if self.available_actions is not None:
-            available_actions = self.available_actions.reshape(
-                -1, batch_size, self.available_actions.shape[-1]
+        action_mask_source = (
+            self.action_masks
+            if self.action_masks is not None
+            else self.available_actions[:-1]
+            if self.available_actions is not None
+            else None
+        )
+        if action_mask_source is not None:
+            available_actions = action_mask_source.reshape(
+                -1, batch_size, action_mask_source.shape[-1]
             )
         value_preds = self.value_preds.reshape(-1, batch_size, 1)
         returns = self.returns.reshape(-1, batch_size, 1)
@@ -796,8 +824,8 @@ class GSReplayBuffer(object):
                 rnn_states_critic_batch.append(rnn_states_critic[0:1, ind])
                 rnn_states_cost_batch.append(rnn_states_cost[0:1, ind])
                 actions_batch.append(actions[:, ind])
-                if self.available_actions is not None:
-                    available_actions_batch.append(available_actions[:-1, ind])
+                if action_mask_source is not None:
+                    available_actions_batch.append(available_actions[:, ind])
                 value_preds_batch.append(value_preds[:-1, ind])
                 return_batch.append(returns[:-1, ind])
                 cost_preds_batch.append(cost_preds[:-1, ind])
@@ -820,7 +848,7 @@ class GSReplayBuffer(object):
             agent_id_batch = np.stack(agent_id_batch, 1)
             share_agent_id_batch = np.stack(share_agent_id_batch, 1)
             actions_batch = np.stack(actions_batch, 1)
-            if self.available_actions is not None:
+            if action_mask_source is not None:
                 available_actions_batch = np.stack(available_actions_batch, 1)
             value_preds_batch = np.stack(value_preds_batch, 1)
             return_batch = np.stack(return_batch, 1)
@@ -853,7 +881,7 @@ class GSReplayBuffer(object):
             agent_id_batch = _flatten(T, N, agent_id_batch)
             share_agent_id_batch = _flatten(T, N, share_agent_id_batch)
             actions_batch = _flatten(T, N, actions_batch)
-            if self.available_actions is not None:
+            if action_mask_source is not None:
                 available_actions_batch = _flatten(T, N, available_actions_batch)
             else:
                 available_actions_batch = None
@@ -999,8 +1027,15 @@ class GSReplayBuffer(object):
         )
         if self.factor is not None:
             factor = _cast(self.factor)
-        if self.available_actions is not None:
-            available_actions = _cast(self.available_actions[:-1])
+        action_mask_source = (
+            self.action_masks
+            if self.action_masks is not None
+            else self.available_actions[:-1]
+            if self.available_actions is not None
+            else None
+        )
+        if action_mask_source is not None:
+            available_actions = _cast(action_mask_source)
         aver_episode_costs = _cast(self.aver_episode_costs[:-1])
         if cost_adv is not None:
             cost_adv = _cast(cost_adv)
@@ -1038,7 +1073,7 @@ class GSReplayBuffer(object):
                 agent_id_batch.append(agent_id[ind : ind + data_chunk_length])
                 share_agent_id_batch.append(share_agent_id[ind : ind + data_chunk_length])
                 actions_batch.append(actions[ind : ind + data_chunk_length])
-                if self.available_actions is not None:
+                if action_mask_source is not None:
                     available_actions_batch.append(available_actions[ind : ind + data_chunk_length])
                 value_preds_batch.append(value_preds[ind : ind + data_chunk_length])
                 return_batch.append(returns[ind : ind + data_chunk_length])
@@ -1065,7 +1100,7 @@ class GSReplayBuffer(object):
             agent_id_batch = np.stack(agent_id_batch, axis=1)
             share_agent_id_batch = np.stack(share_agent_id_batch, axis=1)
             actions_batch = np.stack(actions_batch, axis=1)
-            if self.available_actions is not None:
+            if action_mask_source is not None:
                 available_actions_batch = np.stack(available_actions_batch, axis=1)
             value_preds_batch = np.stack(value_preds_batch, axis=1)
             return_batch = np.stack(return_batch, axis=1)
@@ -1096,7 +1131,7 @@ class GSReplayBuffer(object):
             agent_id_batch = _flatten(L, N, agent_id_batch)
             share_agent_id_batch = _flatten(L, N, share_agent_id_batch)
             actions_batch = _flatten(L, N, actions_batch)
-            if self.available_actions is not None:
+            if action_mask_source is not None:
                 available_actions_batch = _flatten(L, N, available_actions_batch)
             else:
                 available_actions_batch = None

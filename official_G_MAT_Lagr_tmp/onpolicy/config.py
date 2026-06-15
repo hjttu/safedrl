@@ -197,7 +197,7 @@ def get_config():
     parser.add_argument("--obs_type", type=str, choices=["local", "global", "nbd"], default="global", help="Whether to use local obs for navigation.py")
     parser.add_argument("--num_nbd_entities", type=int, default=3, help="Number of entities to be considered as neighbors for `obs_type==ndb_obs`")
     parser.add_argument("--use_comm", type=lambda x: bool(strtobool(x)), default=False, help="Whether to use communication channel for agent observation")
-    parser.add_argument("--action_grid_size", type=int, default=20,
+    parser.add_argument("--action_grid_size", type=int, default=21,
                         help="number of acceleration values per axis for the joint discrete action table")
 
     # replay buffer parameters
@@ -264,8 +264,17 @@ def get_config():
     parser.add_argument("--lamda_scale", type=float, default=0.3, help="ratio for cost_adv_tar")
     parser.add_argument("--use_graph_cbf_shield", type=lambda x: bool(strtobool(x)), default=True,
                         help="use analytical DTCBF masking with graph-based safe-action ranking")
+    parser.add_argument("--use_local_dtcbf_shield", type=lambda x: bool(strtobool(x)), default=True)
+    parser.add_argument("--use_joint_dtcbf_shield", type=lambda x: bool(strtobool(x)), default=False)
+    parser.add_argument("--joint_shield_mode", type=str, default="decentralized_priority",
+                        choices=["none", "decentralized_priority"])
     parser.add_argument("--cbf_alpha", type=float, default=1.0, help="DTCBF class-K coefficient")
     parser.add_argument("--cbf_dt", type=float, default=0.1, help="time step used by the analytical CBF")
+    parser.add_argument("--cbf_max_accel", type=float, default=0.5)
+    parser.add_argument("--cbf_max_speed", type=float, default=1.0)
+    parser.add_argument("--cbf_horizon", type=int, default=1)
+    parser.add_argument("--cbf_include_obstacles", type=lambda x: bool(strtobool(x)), default=True)
+    parser.add_argument("--cbf_include_agents_in_local_mask", type=lambda x: bool(strtobool(x)), default=False)
     parser.add_argument("--cbf_safety_buffer", type=float, default=0.05,
                         help="extra clearance added to entity radii")
     parser.add_argument("--safety_score_coef", type=float, default=0.5,
@@ -276,6 +285,14 @@ def get_config():
                         help="initial safe-guide imitation loss coefficient")
     parser.add_argument("--guide_decay_steepness", type=float, default=12.0,
                         help="steepness of the S-shaped guide-loss decay")
+    parser.add_argument("--no_safe_action_strategy", type=str, default="backup",
+                        choices=["backup", "least_unsafe", "terminate"])
+    parser.add_argument("--backup_action_mode", type=str, default="brake",
+                        choices=["zero", "brake"])
+    parser.add_argument("--max_shield_neighbors", type=int, default=8)
+    parser.add_argument("--priority_metric", type=str, default="min_h",
+                        choices=["min_h", "ttc", "agent_id", "risk_score"])
+    parser.add_argument("--log_shield_stats", type=lambda x: bool(strtobool(x)), default=True)
 
     # curriculum learning parameters
     parser.add_argument("--use_policy", type=lambda x: bool(strtobool(x)), default=False, help="use the fixed policy to conduct tasks")

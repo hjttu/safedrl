@@ -54,6 +54,7 @@ class GSMPERunner(Runner):
 
         # This is where the episodes are actually run.
         for episode in range(episodes):
+            episode_shield_stats = []
             self.trainer.policy.set_training_progress(episode / max(episodes - 1, 1))
             if self.use_linear_lr_decay:
                 self.trainer.policy.lr_decay(episode, episodes)
@@ -72,7 +73,11 @@ class GSMPERunner(Runner):
                     actions_env,
                     cost_preds,
                     rnn_states_cost,
+                    final_action_masks,
+                    shield_stats,
                 ) = self.collect(step)
+                if shield_stats:
+                    episode_shield_stats.append(shield_stats)
 
                 # print("rnn_states:", rnn_states)
 
@@ -94,7 +99,9 @@ class GSMPERunner(Runner):
                     rnn_states,
                     rnn_states_critic,
                     cost_preds,
-                    rnn_states_cost
+                    rnn_states_cost,
+                    final_action_masks,
+                    shield_stats,
                 )
 
                 # insert data into buffer
@@ -103,6 +110,11 @@ class GSMPERunner(Runner):
             # compute return and update network
             self.compute()
             train_infos = self.train()
+            if episode_shield_stats and self.all_args.log_shield_stats:
+                for key in episode_shield_stats[0]:
+                    train_infos[key] = float(
+                        np.mean([stats[key] for stats in episode_shield_stats])
+                    )
 
             # post process
             total_num_steps = (
@@ -190,15 +202,7 @@ class GSMPERunner(Runner):
     @torch.no_grad()
     def collect(self, step: int) -> Tuple[arr, arr, arr, arr, arr, arr, arr, arr]:
         self.trainer.prep_rollout()
-        (
-            value,
-            action,
-            action_log_prob,
-            rnn_states,
-            rnn_states_critic,
-            cost_preds,
-            rnn_states_cost,
-        ) = self.trainer.policy.get_actions(
+        policy_inputs = (
             np.concatenate(self.buffer.share_obs[step]),
             np.concatenate(self.buffer.obs[step]),
             np.concatenate(self.buffer.node_obs[step]),
@@ -210,6 +214,30 @@ class GSMPERunner(Runner):
             np.concatenate(self.buffer.masks[step]),
             np.concatenate(self.buffer.rnn_states_cost[step]),
         )
+        if self.all_args.use_joint_dtcbf_shield:
+            (
+                value,
+                action,
+                action_log_prob,
+                rnn_states,
+                rnn_states_critic,
+                cost_preds,
+                rnn_states_cost,
+                final_action_masks,
+                shield_stats,
+            ) = self.trainer.policy.get_joint_actions(*policy_inputs)
+        else:
+            (
+                value,
+                action,
+                action_log_prob,
+                rnn_states,
+                rnn_states_critic,
+                cost_preds,
+                rnn_states_cost,
+            ) = self.trainer.policy.get_actions(*policy_inputs)
+            final_action_masks = None
+            shield_stats = {}
         # print("cost_preds:", cost_preds)  # DEBUG
         # [self.envs, agents, dim]
         values = np.array(np.split(_t2n(value), self.n_rollout_threads))
@@ -221,6 +249,10 @@ class GSMPERunner(Runner):
         rnn_states_critic = np.array(np.split(_t2n(rnn_states_critic), self.n_rollout_threads))
         cost_preds = np.array(np.split(_t2n(cost_preds), self.n_rollout_threads))
         rnn_states_cost = np.array(np.split(_t2n(rnn_states_cost), self.n_rollout_threads))
+        if final_action_masks is not None:
+            final_action_masks = np.array(
+                np.split(_t2n(final_action_masks), self.n_rollout_threads)
+            )
         
         # rearrange action
         if self.envs.action_space[0].__class__.__name__ == "MultiDiscrete":
@@ -246,6 +278,8 @@ class GSMPERunner(Runner):
             actions_env,
             cost_preds,
             rnn_states_cost,
+            final_action_masks,
+            shield_stats,
         )
 
     def insert(self, data):
@@ -265,6 +299,8 @@ class GSMPERunner(Runner):
             rnn_states_critic,
             cost_preds,
             rnn_states_cost,
+            final_action_masks,
+            shield_stats,
         ) = data
 
         rnn_states[dones == True] = np.zeros(
@@ -316,6 +352,7 @@ class GSMPERunner(Runner):
             costs=costs,
             cost_preds=cost_preds,
             rnn_states_cost=rnn_states_cost,
+            action_masks=final_action_masks,
         )
 
     @torch.no_grad()
@@ -375,15 +412,24 @@ class GSMPERunner(Runner):
 
         while True:
             self.trainer.prep_rollout()
-            eval_action, eval_rnn_states = self.trainer.policy.act(
+            act_inputs = (
                 np.concatenate(eval_obs),
                 np.concatenate(eval_node_obs),
                 np.concatenate(eval_adj),
                 np.concatenate(eval_agent_id),
                 np.concatenate(eval_rnn_states),
                 np.concatenate(eval_masks),
-                deterministic=True,
             )
+            if self.all_args.use_joint_dtcbf_shield:
+                eval_action, eval_rnn_states, _, _ = (
+                    self.trainer.policy.act_joint(
+                        *act_inputs, deterministic=True
+                    )
+                )
+            else:
+                eval_action, eval_rnn_states = self.trainer.policy.act(
+                    *act_inputs, deterministic=True
+                )
             eval_actions = np.array(
                 np.split(_t2n(eval_action), self.n_eval_rollout_threads)
             )
@@ -508,15 +554,22 @@ class GSMPERunner(Runner):
                 calc_start = time.time()
 
                 self.trainer.prep_rollout()
-                action, rnn_states = self.trainer.policy.act(
+                act_inputs = (
                     np.concatenate(obs),
                     np.concatenate(node_obs),
                     np.concatenate(adj),
                     np.concatenate(agent_id),
                     np.concatenate(rnn_states),
                     np.concatenate(masks),
-                    deterministic=True,
                 )
+                if self.all_args.use_joint_dtcbf_shield:
+                    action, rnn_states, _, _ = self.trainer.policy.act_joint(
+                        *act_inputs, deterministic=True
+                    )
+                else:
+                    action, rnn_states = self.trainer.policy.act(
+                        *act_inputs, deterministic=True
+                    )
                 actions = np.array(np.split(_t2n(action), self.n_rollout_threads))
                 rnn_states = np.array(
                     np.split(_t2n(rnn_states), self.n_rollout_threads)

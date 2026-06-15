@@ -24,6 +24,12 @@ for seed in $(seq "${seed_max}"); do
         --scenario_name "graph_navigation_6agts" \
         --max_edge_dist 1.0 \
         --action_grid_size 9 \
+        --use_local_dtcbf_shield "True" \
+        --use_joint_dtcbf_shield "True" \
+        --joint_shield_mode "decentralized_priority" \
+        --cbf_max_accel 0.5 --cbf_max_speed 1.0 \
+        --no_safe_action_strategy "backup" \
+        --backup_action_mode "brake" \
         --clip_param 0.2 --gamma 0.99 \
         --hidden_size 64 --layer_N 1 \
         --num_target 6 --num_agents 6 --num_obstacle 6 --num_dynamic_obs 0 \

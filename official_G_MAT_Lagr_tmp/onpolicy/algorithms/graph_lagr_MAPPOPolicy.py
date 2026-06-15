@@ -5,6 +5,9 @@ import torch
 from torch import Tensor
 from typing import Tuple
 from onpolicy.algorithms.graph_actor_critic import GR_Actor, GR_Critic
+from onpolicy.algorithms.utils.joint_dtcbf_shield import (
+    DecentralizedPriorityJointDTCBFShield,
+)
 from onpolicy.utils.util import update_linear_schedule
 
 
@@ -54,6 +57,12 @@ class GS_MAPPOPolicy:
         self.act_space = act_space
         self.split_batch = args.split_batch
         self.max_batch_size = args.max_batch_size
+        self.num_agents = args.num_agents
+        self.use_joint_dtcbf_shield = (
+            args.use_joint_dtcbf_shield
+            and args.joint_shield_mode == "decentralized_priority"
+        )
+        args.use_joint_dtcbf_shield = self.use_joint_dtcbf_shield
 
         self.actor = GR_Actor(
             args,
@@ -101,6 +110,15 @@ class GS_MAPPOPolicy:
             lr=self.cost_critic_lr,
             eps=self.opti_eps,
             weight_decay=self.weight_decay,
+        )
+        if self.use_joint_dtcbf_shield and not self.actor.use_graph_cbf_shield:
+            raise ValueError("Joint DTCBF shield requires a discrete Graph-CBF actor.")
+        self.joint_shield = (
+            DecentralizedPriorityJointDTCBFShield(
+                args, self.actor.action_table, device
+            )
+            if self.use_joint_dtcbf_shield
+            else None
         )
 
     def lr_decay(self, episode: int, episodes: int) -> None:
@@ -211,6 +229,63 @@ class GS_MAPPOPolicy:
         )
 
         return (values, actions, action_log_probs, rnn_states_actor, rnn_states_critic, cost_preds, rnn_states_cost)
+
+    def get_joint_actions(
+        self,
+        cent_obs,
+        obs,
+        node_obs,
+        adj,
+        agent_id,
+        share_agent_id,
+        rnn_states_actor,
+        rnn_states_critic,
+        masks,
+        rnn_states_cost,
+        deterministic=False,
+    ):
+        logits, local_mask, _, _, rnn_states_actor = (
+            self.actor.get_logits_and_local_masks(
+                obs, node_obs, adj, agent_id, rnn_states_actor, masks
+            )
+        )
+        values, rnn_states_critic = self.critic.forward(
+            cent_obs, node_obs, adj, share_agent_id, rnn_states_critic, masks
+        )
+        cost_preds, rnn_states_cost = self.cost_critic.forward(
+            cent_obs, node_obs, adj, share_agent_id, rnn_states_cost, masks
+        )
+        flat_count = logits.shape[0]
+        if flat_count % self.num_agents != 0:
+            raise ValueError("Joint shield input must contain complete agent groups.")
+        batch_size = flat_count // self.num_agents
+        actions, action_log_probs, final_masks, shield_stats = (
+            self.joint_shield.sample(
+                logits.view(batch_size, self.num_agents, -1),
+                local_mask.view(batch_size, self.num_agents, -1),
+                torch.as_tensor(
+                    node_obs, dtype=torch.float32, device=self.device
+                ).view(batch_size, self.num_agents, *node_obs.shape[1:]),
+                torch.as_tensor(
+                    adj, dtype=torch.float32, device=self.device
+                ).view(batch_size, self.num_agents, *adj.shape[1:]),
+                torch.as_tensor(agent_id, device=self.device).view(
+                    batch_size, self.num_agents, -1
+                ),
+                deterministic=deterministic,
+            )
+        )
+        return (
+            values,
+            actions.view(flat_count, 1),
+            action_log_probs.view(flat_count, 1),
+            rnn_states_actor,
+            rnn_states_critic,
+            cost_preds,
+            rnn_states_cost,
+            final_masks.view(flat_count, -1),
+            shield_stats,
+        )
 
     def get_values(
         self, cent_obs, node_obs, adj, share_agent_id, rnn_states_critic, masks
@@ -378,3 +453,41 @@ class GS_MAPPOPolicy:
             deterministic,
         )
         return actions, rnn_states_actor
+
+    def act_joint(
+        self,
+        obs,
+        node_obs,
+        adj,
+        agent_id,
+        rnn_states_actor,
+        masks,
+        deterministic=True,
+    ):
+        logits, local_mask, _, _, rnn_states_actor = (
+            self.actor.get_logits_and_local_masks(
+                obs, node_obs, adj, agent_id, rnn_states_actor, masks
+            )
+        )
+        flat_count = logits.shape[0]
+        batch_size = flat_count // self.num_agents
+        actions, _, final_masks, stats = self.joint_shield.sample(
+            logits.view(batch_size, self.num_agents, -1),
+            local_mask.view(batch_size, self.num_agents, -1),
+            torch.as_tensor(node_obs, dtype=torch.float32, device=self.device).view(
+                batch_size, self.num_agents, *node_obs.shape[1:]
+            ),
+            torch.as_tensor(adj, dtype=torch.float32, device=self.device).view(
+                batch_size, self.num_agents, *adj.shape[1:]
+            ),
+            torch.as_tensor(agent_id, device=self.device).view(
+                batch_size, self.num_agents, -1
+            ),
+            deterministic=deterministic,
+        )
+        return (
+            actions.view(flat_count, 1),
+            rnn_states_actor,
+            final_masks.view(flat_count, -1),
+            stats,
+        )

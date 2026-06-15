@@ -2,6 +2,7 @@ import argparse
 import gym
 from gym import spaces
 import numpy as np
+from .action_table import decode_action_index
 import math
 import random
 from typing import Callable, List, Tuple, Dict, Union, Optional
@@ -260,9 +261,7 @@ class MultiAgentBaseEnv(gym.Env):
         if agent.movable:
             
             if isinstance(action_space, spaces.Discrete):
-                action_mapping = np.linspace(-1, 1, self.action_grid_size)
-                ux = action_mapping[action[0] // self.action_grid_size]
-                uy = action_mapping[action[0] % self.action_grid_size]
+                ux, uy = decode_action_index(action[0], self.action_grid_size)
             else:
                 action_mapping = np.linspace(-1, 1, 20)
                 ux = np.dot(action[0], action_mapping)

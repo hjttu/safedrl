@@ -312,22 +312,23 @@ class World(object):
             if agent.name == "agent":  # u = [vx, vy], -1~1
                 a_x = u[i][0]*agent.max_accel
                 a_y = u[i][1]*agent.max_accel
-                v_x = agent.state.p_vel[0] + a_x*self.dt
-                v_y = agent.state.p_vel[1] + a_y*self.dt
-                if abs(v_x) > agent.max_speed:
-                    v_x = agent.max_speed if agent.state.p_vel[0]>0 else -agent.max_speed
-                if abs(v_y) > agent.max_speed:
-                    v_y = agent.max_speed if agent.state.p_vel[1]>0 else -agent.max_speed
-                v_next = np.array([v_x, v_y])
-                theta = np.arctan2(v_y, v_x)
+                a = np.array([a_x, a_y], dtype=np.float32)
+                v_next = agent.state.p_vel + a * self.dt
+                if agent.max_speed is not None:
+                    speed = np.linalg.norm(v_next)
+                    if speed > agent.max_speed:
+                        v_next = v_next / speed * agent.max_speed
+                theta = np.arctan2(v_next[1], v_next[0])
                 if theta < 0:
                     theta += np.pi*2 
                 # update phi
                 agent.state.phi = theta
                 # update p_pos
-                agent.state.p_pos += agent.state.p_vel * self.dt  # last v
+                agent.state.p_pos += (
+                    agent.state.p_vel * self.dt + 0.5 * a * self.dt ** 2
+                )
                 # update acc
-                agent.state.last_a = np.array([a_x, a_y])
+                agent.state.last_a = a
                 # update p_vel
                 agent.state.p_vel = v_next
             else:  # u = [Vx, Vy]
