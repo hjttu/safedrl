@@ -162,14 +162,16 @@ class Runner(object):
 
         return train_info
 
-    def save(self):
+    def save(self, save_dir=None):
         """Save policy's actor and critic networks."""
+        save_dir = str(save_dir or self.save_dir)
+        os.makedirs(save_dir, exist_ok=True)
         policy_actor = self.trainer.policy.actor
-        torch.save(policy_actor.state_dict(), str(self.save_dir) + "/actor.pt")
+        torch.save(policy_actor.state_dict(), save_dir + "/actor.pt")
         policy_critic = self.trainer.policy.critic
-        torch.save(policy_critic.state_dict(), str(self.save_dir) + "/critic.pt")
+        torch.save(policy_critic.state_dict(), save_dir + "/critic.pt")
         policy_cost_critic = self.trainer.policy.cost_critic
-        torch.save(policy_cost_critic.state_dict(), str(self.save_dir) + "/cost_critic.pt")
+        torch.save(policy_cost_critic.state_dict(), save_dir + "/cost_critic.pt")
 
     def restore(self):
         """Restore policy's networks from a saved model."""

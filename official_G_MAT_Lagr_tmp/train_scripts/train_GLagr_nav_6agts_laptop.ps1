@@ -70,6 +70,8 @@ try {
         "--split_batch", "True", "--max_batch_size", "128"
         "--auto_mini_batch_size", "True", "--target_mini_batch_size", "128"
         "--log_interval", "1"
+        "--train_metric_window", "30"
+        "--best_model_cost_limit", "1.0"
     )
 
     # Windows PowerShell converts native stderr output (including harmless

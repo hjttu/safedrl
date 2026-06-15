@@ -68,5 +68,7 @@ for seed in $(seq "${seed_max}"); do
         --embed_hidden_size 16 --embed_layer_N 1 \
         --split_batch "True" --max_batch_size 128 \
         --auto_mini_batch_size "True" --target_mini_batch_size 128 \
+        --train_metric_window 30 \
+        --best_model_cost_limit 1.0 \
         --log_interval 1
 done

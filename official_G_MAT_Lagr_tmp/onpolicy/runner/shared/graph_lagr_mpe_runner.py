@@ -1,4 +1,7 @@
 import time
+import json
+import os
+from collections import deque
 import numpy as np
 from numpy import ndarray as arr
 from typing import Tuple
@@ -28,8 +31,60 @@ class GSMPERunner(Runner):
         self.no_imageshow = self.all_args.no_imageshow
         self.reward_file_name = self.all_args.reward_file_name
         self.cost_file_name = self.all_args.cost_file_name
+        self.metric_window = max(int(self.all_args.train_metric_window), 1)
+        self.recent_episode_rewards = deque(maxlen=self.metric_window)
+        self.recent_episode_costs = deque(maxlen=self.metric_window)
+        self.best_model_cost_limit = float(
+            self.all_args.best_model_cost_limit
+        )
+        self.best_safe_reward = -np.inf
+        self.best_fallback_cost = np.inf
+        self.best_model_dir = os.path.join(str(self.save_dir), "best")
         if self.use_train_render:
             print("render the image while training")
+
+    def _update_rolling_metrics(self):
+        episode_rewards = self.buffer.rewards.mean(2).sum(axis=0).reshape(-1)
+        episode_costs = self.buffer.costs.mean(2).sum(axis=0).reshape(-1)
+        self.recent_episode_rewards.extend(episode_rewards.tolist())
+        self.recent_episode_costs.extend(episode_costs.tolist())
+        return (
+            float(np.mean(self.recent_episode_rewards)),
+            float(np.mean(self.recent_episode_costs)),
+        )
+
+    def _save_best_model(self, reward, cost, episode, total_num_steps):
+        if len(self.recent_episode_rewards) < self.metric_window:
+            return False
+        safe_candidate = cost <= self.best_model_cost_limit
+        improved = (
+            safe_candidate and reward > self.best_safe_reward
+        ) or (
+            not np.isfinite(self.best_safe_reward)
+            and cost < self.best_fallback_cost
+        )
+        if not improved:
+            return False
+        if safe_candidate:
+            self.best_safe_reward = reward
+        self.best_fallback_cost = min(self.best_fallback_cost, cost)
+        self.save(self.best_model_dir)
+        metadata = {
+            "episode": int(episode),
+            "total_num_steps": int(total_num_steps),
+            "rolling_window_episodes": int(len(self.recent_episode_rewards)),
+            "average_episode_rewards": float(reward),
+            "average_episode_costs": float(cost),
+            "cost_limit": float(self.best_model_cost_limit),
+            "safe_candidate": bool(safe_candidate),
+        }
+        with open(
+            os.path.join(self.best_model_dir, "best_model.json"),
+            "w",
+            encoding="utf-8",
+        ) as file:
+            json.dump(metadata, file, indent=2)
+        return True
 
     def run(self):
         if self.save_data:
@@ -120,6 +175,20 @@ class GSMPERunner(Runner):
             total_num_steps = (
                 (episode + 1) * self.episode_length * self.n_rollout_threads
             )
+            raw_ep_rew = float(
+                np.mean(self.buffer.rewards) * self.episode_length
+            )
+            raw_ep_cost = float(
+                np.mean(self.buffer.costs) * self.episode_length
+            )
+            avg_ep_rew, avg_ep_cost = self._update_rolling_metrics()
+            train_infos["raw_average_episode_rewards"] = raw_ep_rew
+            train_infos["raw_average_episode_costs"] = raw_ep_cost
+            train_infos["average_episode_rewards"] = avg_ep_rew
+            train_infos["average_episode_costs"] = avg_ep_cost
+            saved_best = self._save_best_model(
+                avg_ep_rew, avg_ep_cost, episode, total_num_steps
+            )
 
             # save model
             if episode % self.save_interval == 0 or episode == episodes - 1:
@@ -131,11 +200,6 @@ class GSMPERunner(Runner):
 
                 env_infos = self.process_infos(infos)
 
-                avg_ep_rew = np.mean(self.buffer.rewards) * self.episode_length
-                train_infos["average_episode_rewards"] = avg_ep_rew
-                avg_ep_cost = np.mean(self.buffer.costs) * self.episode_length
-                train_infos["average_episode_costs"] = avg_ep_cost
-      
                 print("\n Scenario {} Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}, CL {}.\n"
                         .format(self.all_args.scenario_name,
                                 self.algorithm_name,
@@ -146,8 +210,26 @@ class GSMPERunner(Runner):
                                 self.num_env_steps,
                                 int(total_num_steps / (end - start)),
                                 format(glv.get_value('CL_ratio'), '.3f')))
-                print("average episode rewards is {}".format(avg_ep_rew))
-                print("average episode costs is {}".format(avg_ep_cost))
+                print(
+                    "average episode rewards (last {}/{}) is {}"
+                    .format(
+                        len(self.recent_episode_rewards),
+                        self.metric_window,
+                        avg_ep_rew,
+                    )
+                )
+                print(
+                    "average episode costs (last {}/{}) is {}"
+                    .format(
+                        len(self.recent_episode_costs),
+                        self.metric_window,
+                        avg_ep_cost,
+                    )
+                )
+                if saved_best:
+                    print(
+                        "saved best model to {}".format(self.best_model_dir)
+                    )
 
                 self.log_train(train_infos, total_num_steps)
                 self.log_env(env_infos, total_num_steps)

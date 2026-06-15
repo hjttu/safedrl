@@ -331,6 +331,10 @@ def get_config():
     
     # save parameters
     parser.add_argument("--save_interval", type=int, default=1, help="time duration between continuous twice models saving.")
+    parser.add_argument("--train_metric_window", type=int, default=30,
+                        help="number of completed rollout episodes used for displayed reward/cost averages")
+    parser.add_argument("--best_model_cost_limit", type=float, default=1.0,
+                        help="maximum rolling episode cost for reward-based best-model selection")
     parser.add_argument("--reward_file_name", type=str, default=None, help="csv name of training reward.")
     parser.add_argument("--cost_file_name", type=str, default=None, help="csv name of training cost.")
     parser.add_argument("--render_file_name", type=str, default=None, help="data saving for monte carlo or rendering traj.")
