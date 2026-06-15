@@ -34,6 +34,7 @@ class GSMPERunner(Runner):
         self.metric_window = max(int(self.all_args.train_metric_window), 1)
         self.recent_episode_rewards = deque(maxlen=self.metric_window)
         self.recent_episode_costs = deque(maxlen=self.metric_window)
+        self.recent_episode_collisions = deque(maxlen=self.metric_window)
         self.best_model_cost_limit = float(
             self.all_args.best_model_cost_limit
         )
@@ -43,17 +44,38 @@ class GSMPERunner(Runner):
         if self.use_train_render:
             print("render the image while training")
 
-    def _update_rolling_metrics(self):
+    def _episode_collisions_from_infos(self, infos):
+        episode_collisions = []
+        for env_info in infos:
+            agent_collisions = sum(
+                float(agent_info.get("Num_agent_collisions", 0.0))
+                for agent_info in env_info
+            )
+            obstacle_collisions = sum(
+                float(agent_info.get("Num_obst_collisions", 0.0))
+                for agent_info in env_info
+            )
+            episode_collisions.append(
+                0.5 * agent_collisions + obstacle_collisions
+            )
+        return episode_collisions
+
+    def _update_rolling_metrics(self, infos):
         episode_rewards = self.buffer.rewards.mean(2).sum(axis=0).reshape(-1)
         episode_costs = self.buffer.costs.mean(2).sum(axis=0).reshape(-1)
+        episode_collisions = self._episode_collisions_from_infos(infos)
         self.recent_episode_rewards.extend(episode_rewards.tolist())
         self.recent_episode_costs.extend(episode_costs.tolist())
+        self.recent_episode_collisions.extend(episode_collisions)
         return (
             float(np.mean(self.recent_episode_rewards)),
             float(np.mean(self.recent_episode_costs)),
+            float(np.mean(self.recent_episode_collisions)),
         )
 
-    def _save_best_model(self, reward, cost, episode, total_num_steps):
+    def _save_best_model(
+        self, reward, cost, collisions, episode, total_num_steps
+    ):
         if len(self.recent_episode_rewards) < self.metric_window:
             return False
         safe_candidate = cost <= self.best_model_cost_limit
@@ -75,6 +97,7 @@ class GSMPERunner(Runner):
             "rolling_window_episodes": int(len(self.recent_episode_rewards)),
             "average_episode_rewards": float(reward),
             "average_episode_costs": float(cost),
+            "average_episode_collisions": float(collisions),
             "cost_limit": float(self.best_model_cost_limit),
             "safe_candidate": bool(safe_candidate),
         }
@@ -181,13 +204,24 @@ class GSMPERunner(Runner):
             raw_ep_cost = float(
                 np.mean(self.buffer.costs) * self.episode_length
             )
-            avg_ep_rew, avg_ep_cost = self._update_rolling_metrics()
+            avg_ep_rew, avg_ep_cost, avg_ep_collisions = (
+                self._update_rolling_metrics(infos)
+            )
+            raw_ep_collisions = float(
+                np.mean(self._episode_collisions_from_infos(infos))
+            )
             train_infos["raw_average_episode_rewards"] = raw_ep_rew
             train_infos["raw_average_episode_costs"] = raw_ep_cost
+            train_infos["raw_average_episode_collisions"] = raw_ep_collisions
             train_infos["average_episode_rewards"] = avg_ep_rew
             train_infos["average_episode_costs"] = avg_ep_cost
+            train_infos["average_episode_collisions"] = avg_ep_collisions
             saved_best = self._save_best_model(
-                avg_ep_rew, avg_ep_cost, episode, total_num_steps
+                avg_ep_rew,
+                avg_ep_cost,
+                avg_ep_collisions,
+                episode,
+                total_num_steps,
             )
 
             # save model
@@ -224,6 +258,14 @@ class GSMPERunner(Runner):
                         len(self.recent_episode_costs),
                         self.metric_window,
                         avg_ep_cost,
+                    )
+                )
+                print(
+                    "average episode collisions (last {}/{}) is {}"
+                    .format(
+                        len(self.recent_episode_collisions),
+                        self.metric_window,
+                        avg_ep_collisions,
                     )
                 )
                 if saved_best:

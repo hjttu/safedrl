@@ -13,6 +13,7 @@ def make_runner(tmp_path):
     runner.metric_window = 3
     runner.recent_episode_rewards = deque(maxlen=3)
     runner.recent_episode_costs = deque(maxlen=3)
+    runner.recent_episode_collisions = deque(maxlen=3)
     runner.best_model_cost_limit = 1.0
     runner.best_safe_reward = -np.inf
     runner.best_fallback_cost = np.inf
@@ -43,24 +44,38 @@ def test_rolling_metrics_use_completed_rollout_episodes(tmp_path):
             ]
         ),
     )
-    reward, cost = runner._update_rolling_metrics()
+    infos = [
+        [
+            {"Num_agent_collisions": 2, "Num_obst_collisions": 1},
+            {"Num_agent_collisions": 2, "Num_obst_collisions": 0},
+        ],
+        [
+            {"Num_agent_collisions": 0, "Num_obst_collisions": 1},
+            {"Num_agent_collisions": 0, "Num_obst_collisions": 2},
+        ],
+    ]
+    reward, cost, collisions = runner._update_rolling_metrics(infos)
     assert list(runner.recent_episode_rewards) == [4.0, 12.0]
     assert list(runner.recent_episode_costs) == [2.0, 4.0]
+    assert list(runner.recent_episode_collisions) == [3.0, 3.0]
     assert reward == 8.0
     assert cost == 3.0
+    assert collisions == 3.0
 
 
 def test_best_model_waits_for_full_window_and_respects_cost(tmp_path):
     runner = make_runner(tmp_path)
     runner.recent_episode_rewards.extend([10.0, 20.0])
     runner.recent_episode_costs.extend([0.0, 0.0])
-    assert not runner._save_best_model(15.0, 0.0, 1, 100)
+    runner.recent_episode_collisions.extend([0.0, 0.0])
+    assert not runner._save_best_model(15.0, 0.0, 0.0, 1, 100)
 
     runner.recent_episode_rewards.append(30.0)
     runner.recent_episode_costs.append(0.0)
-    assert runner._save_best_model(20.0, 0.5, 2, 200)
-    assert not runner._save_best_model(100.0, 2.0, 3, 300)
-    assert runner._save_best_model(25.0, 0.8, 4, 400)
+    runner.recent_episode_collisions.append(0.0)
+    assert runner._save_best_model(20.0, 0.5, 1.0, 2, 200)
+    assert not runner._save_best_model(100.0, 2.0, 5.0, 3, 300)
+    assert runner._save_best_model(25.0, 0.8, 2.0, 4, 400)
     assert runner.saved == 2
 
     metadata = json.loads(
@@ -68,3 +83,4 @@ def test_best_model_waits_for_full_window_and_respects_cost(tmp_path):
     )
     assert metadata["episode"] == 4
     assert metadata["average_episode_rewards"] == 25.0
+    assert metadata["average_episode_collisions"] == 2.0
