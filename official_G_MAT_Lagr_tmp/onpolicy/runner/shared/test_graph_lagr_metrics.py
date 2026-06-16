@@ -84,3 +84,11 @@ def test_best_model_waits_for_full_window_and_respects_cost(tmp_path):
     assert metadata["episode"] == 4
     assert metadata["average_episode_rewards"] == 25.0
     assert metadata["average_episode_collisions"] == 2.0
+
+
+def test_best_model_is_disabled_without_save_dir(tmp_path):
+    runner = make_runner(tmp_path)
+    runner.best_model_dir = None
+    runner.recent_episode_rewards.extend([10.0, 20.0, 30.0])
+    runner.recent_episode_costs.extend([0.0, 0.0, 0.0])
+    assert not runner._save_best_model(30.0, 0.0, 0.0, 1, 100)

@@ -40,7 +40,11 @@ class GSMPERunner(Runner):
         )
         self.best_safe_reward = -np.inf
         self.best_fallback_cost = np.inf
-        self.best_model_dir = os.path.join(str(self.save_dir), "best")
+        self.best_model_dir = (
+            os.path.join(str(self.save_dir), "best")
+            if hasattr(self, "save_dir")
+            else None
+        )
         if self.use_train_render:
             print("render the image while training")
 
@@ -76,6 +80,8 @@ class GSMPERunner(Runner):
     def _save_best_model(
         self, reward, cost, collisions, episode, total_num_steps
     ):
+        if self.best_model_dir is None:
+            return False
         if len(self.recent_episode_rewards) < self.metric_window:
             return False
         safe_candidate = cost <= self.best_model_cost_limit
